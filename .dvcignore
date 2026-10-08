@@ -1,0 +1,4 @@
+# Files DVC ignores when hashing directories (same syntax as .gitignore).
+**/__pycache__
+**/.ipynb_checkpoints
+**/.gitkeep

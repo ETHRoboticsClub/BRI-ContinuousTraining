@@ -1,0 +1,29 @@
+dataset:
+  raw_dir: data/raw/recordings
+  out_dir: data/processed/default
+  meta_keys: [subject, session, trial]
+  test: {session: [2]}      # recordings held out for the final test
+  window: 200               # samples after preprocessing
+  stride: 50
+  skip_start: 0.25          # seconds dropped at the start of each recording
+
+preprocessing:              # arguments of src/preprocessing.py:preprocess
+  fs: 2048
+  bandpass: [20, 450]
+  notch: 50
+  downsample: 2
+
+model:                      # arguments of src/model.py:Model
+  hidden: 32
+  layers: 3
+  kernel_size: 5
+  dropout: 0.1
+
+train:
+  out_dir: runs/default
+  val: {trial: [4]}         # taken out of the train recordings for model selection
+  epochs: 20
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0001
+  seed: 0

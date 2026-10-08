@@ -1,0 +1,15 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# versioned with DVC
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/*.dvc
+data/processed/*
+!data/processed/.gitkeep
+runs/*
+!runs/.gitkeep

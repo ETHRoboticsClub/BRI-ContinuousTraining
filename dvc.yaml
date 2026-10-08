@@ -1,0 +1,33 @@
+stages:
+  build_dataset:
+    cmd: python scripts/build_dataset.py
+    deps:
+      - ${dataset.raw_dir}
+      - scripts/build_dataset.py
+      - src/dataset.py
+      - src/preprocessing.py
+    params:
+      - dataset
+      - preprocessing
+    outs:
+      - ${dataset.out_dir}
+
+  train:
+    cmd: python scripts/train.py
+    deps:
+      - ${dataset.out_dir}
+      - scripts/train.py
+      - src
+    params:
+      - model
+      - train
+    outs:
+      - ${train.out_dir}/best_model.pt
+      - ${train.out_dir}/probes
+    metrics:
+      - ${train.out_dir}/metrics.json:
+          cache: false
+    plots:
+      - ${train.out_dir}/history.csv:
+          cache: false
+          x: epoch
