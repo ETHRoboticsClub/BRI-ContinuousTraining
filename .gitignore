@@ -4,12 +4,3 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .ipynb_checkpoints/
-
-# versioned with DVC
-data/raw/*
-!data/raw/.gitkeep
-!data/raw/*.dvc
-data/processed/*
-!data/processed/.gitkeep
-runs/*
-!runs/.gitkeep

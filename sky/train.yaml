@@ -1,0 +1,41 @@
+# Runs the DVC pipeline (dvc.yaml) on a GPU machine.
+#
+#   sky launch -c hri-gpu sky/train.yaml --env SMOKE_TEST=1   # first time: create the machine, check GPU + S3
+#   sky exec hri-gpu sky/train.yaml                           # sync the code and run: dvc pull -> repro -> push
+#   sky/fetch.sh                                              # bring dvc.lock + metrics back, then commit
+#   sky stop hri-gpu / sky start hri-gpu                      # pause / resume (stops automatically when idle)
+
+name: hri-train
+
+resources:
+  infra: aws/us-east-1       # same region as the hri-control bucket
+  accelerators: A10G:1
+  autostop: 30               # stop after 30 idle minutes (disk and installed packages are kept)
+
+workdir: .                   # files excluded by .skyignore are not uploaded
+
+file_mounts:
+  ~/.aws/credentials: ~/.aws/credentials   # the `hri` profile used by .dvc/config
+
+envs:
+  SMOKE_TEST: 0
+
+setup: |
+  set -e
+  pip install -e .
+
+run: |
+  set -e
+  # DVC needs a git repo; create one if the workdir sync did not include .git
+  if [ ! -d .git ]; then
+    git init -q && git add -A && git -c user.name=sky -c user.email=sky@localhost commit -qm sky
+  fi
+  if [ "$SMOKE_TEST" = "1" ]; then
+    nvidia-smi --query-gpu=name,memory.total --format=csv
+    python -c "import torch; print('CUDA:', torch.cuda.is_available())"
+    dvc status --cloud   # fails if S3 is not reachable
+    exit 0
+  fi
+  dvc pull --allow-missing
+  dvc repro
+  dvc push
