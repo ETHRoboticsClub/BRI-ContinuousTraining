@@ -1,4 +1,4 @@
-# emg2action — training
+# Training Pipeline (Embedding, Discrete Decoder, and Continuous Decoder)
 
 Train models that map forearm EMG to robotic arm actuator activations.
 

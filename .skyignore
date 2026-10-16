@@ -1,0 +1,13 @@
+# Not uploaded to SkyPilot machines (replaces .gitignore for the workdir sync).
+# Data and models come from S3 through `dvc pull`.
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.dvc/cache/
+.dvc/tmp/
+data/raw/*/
+data/processed/
+runs/

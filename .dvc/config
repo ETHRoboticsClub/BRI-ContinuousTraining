@@ -1,0 +1,6 @@
+[core]
+    remote = storage
+['remote "storage"']
+    url = s3://hri-control/dvcstore
+    region = us-east-1
+    profile = hri
