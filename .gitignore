@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 data/
 
 # Byte-compiled / optimized / DLL files
@@ -220,3 +221,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+=======
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+>>>>>>> c35acb1 (Add S3 DVC remote and SkyPilot GPU training)
