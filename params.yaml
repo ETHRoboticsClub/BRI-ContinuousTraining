@@ -1,8 +1,8 @@
 dataset:
-  raw_dir: data/raw/emg_fk      # Path to imported 200 Hz EMG-FK dataset
+  raw_dir: data/raw/emg_fk      # Path to imported 200 Hz EMG-FK dataset (all 20 subjects)
   out_dir: data/processed/emg_fk_cross_sub
   meta_keys: [subject, session, trial]
-  test: {subject: [5]}          # Subject 5 held out for cross-subject testing
+  test: {subject: [20]}         # Subject 20 held out for cross-subject testing
   normalize_per: "subject"      # Normalize EMG independently per participant
   window: 240                   # 1.2 s at 200 Hz (60-sample subwindows, step 20)
   stride: 40                    # 200 ms stride between consecutive training windows
@@ -27,11 +27,12 @@ model:                          # arguments of src/model.py:Model (Temporal Riem
 
 train:
   out_dir: runs/cross_subject
-  val: {subject: [4]}           # Subject 4 held out for cross-subject validation
+  val: {subject: [19]}          # Subject 19 held out for cross-subject validation
   epochs: 15
-  batch_size: 128
+  batch_size: 256               # 256 batch size as in Colot et al. (2026)
   lr: 0.0002                    # learning rate (2e-4 optimal in Colot et al. 2026)
   weight_decay: 0.0001
   loss: huber                   # Huber loss (or "mse")
   grad_clip: 1.0                # Gradient norm clipping of 1.0
   seed: 0
+  device: cuda                  # Offload model and computation to GPU

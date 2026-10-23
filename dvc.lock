@@ -5,9 +5,9 @@ stages:
     deps:
     - path: data/raw/emg_fk
       hash: md5
-      md5: 003f8b158fe61f16e06bdd42fd0f50fc.dir
-      size: 167326620
-      nfiles: 10
+      md5: 1cd9d9284f649bcff95838baa300cb43.dir
+      size: 668713540
+      nfiles: 40
     - path: scripts/build_dataset.py
       hash: md5
       md5: 109da0d2ef3c5e79f1a434d99e67ef65
@@ -31,7 +31,7 @@ stages:
           - trial
           test:
             subject:
-            - 5
+            - 20
           normalize_per: subject
           window: 240
           stride: 40
@@ -54,21 +54,21 @@ stages:
     outs:
     - path: data/processed/emg_fk_cross_sub
       hash: md5
-      md5: 6f2826f4fd5805e7f451f8d64ea4ad08.dir
-      size: 351896154
+      md5: 457f71cdb9163df7e00139111d96d953.dir
+      size: 1406338698
       nfiles: 8
   train:
     cmd: python scripts/train.py
     deps:
     - path: data/processed/emg_fk_cross_sub
       hash: md5
-      md5: 6f2826f4fd5805e7f451f8d64ea4ad08.dir
-      size: 351896154
+      md5: 457f71cdb9163df7e00139111d96d953.dir
+      size: 1406338698
       nfiles: 8
     - path: scripts/train.py
       hash: md5
-      md5: fd2edbdc995ff1ff20b1e6719f01d654
-      size: 2001
+      md5: c2e056f42bdf9f124bd76cefe39f9e2d
+      size: 2288
     - path: src
       hash: md5
       md5: 30f3c91820eb3058cd61f57b5232ee25.dir
@@ -90,29 +90,30 @@ stages:
           out_dir: runs/cross_subject
           val:
             subject:
-            - 4
+            - 19
           epochs: 15
-          batch_size: 128
+          batch_size: 256
           lr: 0.0002
           weight_decay: 0.0001
           loss: huber
           grad_clip: 1.0
           seed: 0
+          device: cuda
     outs:
     - path: runs/cross_subject/best_model.pt
       hash: md5
-      md5: 1320571fcaf833dd9eff081d1236befb
-      size: 2253429
+      md5: f2d423283ddb301b6ee81d41a6aea240
+      size: 2252194
     - path: runs/cross_subject/history.csv
       hash: md5
-      md5: b7aeba9fe5c014f73ea028d023b95e30
-      size: 3669
+      md5: 8334d19593b343e0963a4d8e02036b58
+      size: 3656
     - path: runs/cross_subject/metrics.json
       hash: md5
-      md5: db4b33ee26a7ff214aa237bfd9415b91
-      size: 466
+      md5: 74df94c2645d61e78995047ca77559a0
+      size: 469
     - path: runs/cross_subject/probes
       hash: md5
-      md5: e74079551e130fb97888fa5caf12a5af.dir
-      size: 413936
+      md5: 9d7a763e33a3494760b86f7b770e4ff7.dir
+      size: 539855
       nfiles: 8

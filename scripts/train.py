@@ -42,6 +42,9 @@ if __name__ == "__main__":
     # 4. Training & Evaluation
     loss_fn = nn.HuberLoss() if cfg.get("loss", "huber") == "huber" else nn.MSELoss()
     grad_clip = cfg.get("grad_clip", 1.0)
+    device = cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    device_name = torch.cuda.get_device_name(0) if device == "cuda" and torch.cuda.is_available() else "CPU"
+    print(f"Offloading model training to device: {device} ({device_name})")
 
     train(
         model,
@@ -54,4 +57,5 @@ if __name__ == "__main__":
         weight_decay=cfg["weight_decay"],
         grad_clip=grad_clip,
         loss_fn=loss_fn,
+        device=device,
     )
