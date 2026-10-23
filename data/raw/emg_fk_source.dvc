@@ -1,0 +1,6 @@
+outs:
+- md5: c2a29887ee8478d4d4adafc63869c128.dir
+  size: 527521848
+  nfiles: 5
+  hash: md5
+  path: emg_fk_source

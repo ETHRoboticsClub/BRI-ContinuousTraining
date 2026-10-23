@@ -1,29 +1,37 @@
 dataset:
-  raw_dir: data/raw/recordings
-  out_dir: data/processed/default
+  raw_dir: data/raw/emg_fk      # Path to imported 200 Hz EMG-FK dataset
+  out_dir: data/processed/emg_fk_cross_sub
   meta_keys: [subject, session, trial]
-  test: {session: [2]}      # recordings held out for the final test
-  window: 200               # samples after preprocessing
-  stride: 50
-  skip_start: 0.25          # seconds dropped at the start of each recording
+  test: {subject: [5]}          # Subject 5 held out for cross-subject testing
+  normalize_per: "subject"      # Normalize EMG independently per participant
+  window: 240                   # 1.2 s at 200 Hz (60-sample subwindows, step 20)
+  stride: 40                    # 200 ms stride between consecutive training windows
+  skip_start: 0.25              # seconds dropped at the start of each recording
 
-preprocessing:              # arguments of src/preprocessing.py:preprocess
-  fs: 2048
-  bandpass: [20, 450]
-  notch: 50
-  downsample: 2
+preprocessing:                  # arguments of src/preprocessing.py:preprocess
+  fs: 200                       # EMG-FK imported sampling rate in Hz
+  bandpass: [15, 95]            # 4th-order Butterworth bandpass (terminating before 100 Hz Nyquist)
+  notch: 50                     # 50 Hz power-line notch filter
+  downsample: 1                 # downsampling factor (already resampled to 200 Hz)
+  multiband: false              # Optional tag: true for multi-band, false for single-band
+  bands: [[15, 35], [35, 65], [65, 95]] # Frequency bands used when multiband: true
 
-model:                      # arguments of src/model.py:Model
-  hidden: 32
-  layers: 3
-  kernel_size: 5
-  dropout: 0.1
+model:                          # arguments of src/model.py:Model (Temporal Riemannian Regressor)
+  hidden_dense: 256             # units in input projection dense layer
+  gru_units: [256, 128]         # stacked GRU hidden layer units
+  dense_units: 64               # embedding dense layer units
+  dropout: 0.1                  # dropout rate in GRU layers
+  n_sub_windows: 10             # number of temporal sub-windows
+  n_bands: 1                    # 1 for single-band (simplified TRR), 3 for multi-band
+  activation: "linear"          # "linear" for continuous finger joint angles (degrees)
 
 train:
-  out_dir: runs/default
-  val: {trial: [4]}         # taken out of the train recordings for model selection
-  epochs: 20
+  out_dir: runs/cross_subject
+  val: {subject: [4]}           # Subject 4 held out for cross-subject validation
+  epochs: 15
   batch_size: 128
-  lr: 0.001
+  lr: 0.0002                    # learning rate (2e-4 optimal in Colot et al. 2026)
   weight_decay: 0.0001
+  loss: huber                   # Huber loss (or "mse")
+  grad_clip: 1.0                # Gradient norm clipping of 1.0
   seed: 0

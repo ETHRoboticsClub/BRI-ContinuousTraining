@@ -51,9 +51,23 @@ def build_dataset(params, preprocess):
     X, y, meta = np.concatenate(X), np.concatenate(y), np.concatenate(meta).astype(np.int32)
 
     is_test = select(meta, meta_keys, cfg["test"])
-    mean = X[~is_test].mean(axis=(0, 2), keepdims=True)[0]
-    std = X[~is_test].std(axis=(0, 2), keepdims=True)[0] + 1e-6
-    X = (X - mean) / std
+    norm_per = cfg.get("normalize_per", "subject" if "subject" in meta_keys else "global")
+    if norm_per == "subject" and "subject" in meta_keys:
+        subj_idx = meta_keys.index("subject")
+        unique_subjects = np.unique(meta[:, subj_idx])
+        for s in unique_subjects:
+            s_mask = meta[:, subj_idx] == s
+            m = X[s_mask].mean(axis=(0, 2), keepdims=True)
+            s_dev = X[s_mask].std(axis=(0, 2), keepdims=True) + 1e-6
+            X[s_mask] = (X[s_mask] - m) / s_dev
+        subj_list = list(unique_subjects)
+        print(f"Standardized EMG independently for {len(unique_subjects)} participants (subjects: {subj_list})")
+        mean = X.mean(axis=(0, 2), keepdims=True)[0]
+        std = X.std(axis=(0, 2), keepdims=True)[0] + 1e-6
+    else:
+        mean = X[~is_test].mean(axis=(0, 2), keepdims=True)[0]
+        std = X[~is_test].std(axis=(0, 2), keepdims=True)[0] + 1e-6
+        X = (X - mean) / std
 
     out = Path(cfg["out_dir"])
     for split, mask in (("train", ~is_test), ("test", is_test)):

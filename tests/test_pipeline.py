@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import yaml
@@ -34,9 +35,10 @@ def write_recordings(raw_dir, fs=2048, seconds=3, channels=8, targets=3):
 
 def test_build_and_train(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    params = yaml.safe_load(open(__file__.replace("tests/test_pipeline.py", "params.yaml")))
-    params["train"].update(epochs=2, batch_size=32)
-    write_recordings(tmp_path / params["dataset"]["raw_dir"])
+    params = yaml.safe_load(open(Path(__file__).resolve().parent.parent / "params.yaml"))
+    params["dataset"].update(test={"session": [2]})
+    params["train"].update(epochs=2, batch_size=8, val={"trial": [4]})
+    write_recordings(tmp_path / params["dataset"]["raw_dir"], fs=params["preprocessing"]["fs"], seconds=6)
 
     build_dataset(params, preprocess)
     set_seed(0)

@@ -1,0 +1,6 @@
+outs:
+- md5: 003f8b158fe61f16e06bdd42fd0f50fc.dir
+  size: 167326620
+  nfiles: 10
+  hash: md5
+  path: emg_fk

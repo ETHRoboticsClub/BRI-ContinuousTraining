@@ -1,0 +1,118 @@
+schema: '2.0'
+stages:
+  build_dataset:
+    cmd: python scripts/build_dataset.py
+    deps:
+    - path: data/raw/emg_fk
+      hash: md5
+      md5: 003f8b158fe61f16e06bdd42fd0f50fc.dir
+      size: 167326620
+      nfiles: 10
+    - path: scripts/build_dataset.py
+      hash: md5
+      md5: 109da0d2ef3c5e79f1a434d99e67ef65
+      size: 215
+    - path: src/dataset.py
+      hash: md5
+      md5: e1294c1f5de6312b74e26b5da2077a5c
+      size: 5233
+    - path: src/preprocessing.py
+      hash: md5
+      md5: b736b835b7d77801d70ff5ae427a0473
+      size: 11865
+    params:
+      params.yaml:
+        dataset:
+          raw_dir: data/raw/emg_fk
+          out_dir: data/processed/emg_fk_cross_sub
+          meta_keys:
+          - subject
+          - session
+          - trial
+          test:
+            subject:
+            - 5
+          normalize_per: subject
+          window: 240
+          stride: 40
+          skip_start: 0.25
+        preprocessing:
+          fs: 200
+          bandpass:
+          - 15
+          - 95
+          notch: 50
+          downsample: 1
+          multiband: false
+          bands:
+          - - 15
+            - 35
+          - - 35
+            - 65
+          - - 65
+            - 95
+    outs:
+    - path: data/processed/emg_fk_cross_sub
+      hash: md5
+      md5: 6f2826f4fd5805e7f451f8d64ea4ad08.dir
+      size: 351896154
+      nfiles: 8
+  train:
+    cmd: python scripts/train.py
+    deps:
+    - path: data/processed/emg_fk_cross_sub
+      hash: md5
+      md5: 6f2826f4fd5805e7f451f8d64ea4ad08.dir
+      size: 351896154
+      nfiles: 8
+    - path: scripts/train.py
+      hash: md5
+      md5: 78e7c696b8e3e603870b7a3abd857510
+      size: 2057
+    - path: src
+      hash: md5
+      md5: c538817472150fe3345bec8dc8300a66.dir
+      size: 47175
+      nfiles: 7
+    params:
+      params.yaml:
+        model:
+          hidden_dense: 256
+          gru_units:
+          - 256
+          - 128
+          dense_units: 64
+          dropout: 0.1
+          n_sub_windows: 10
+          n_bands: 1
+          activation: linear
+        train:
+          out_dir: runs/cross_subject
+          val:
+            subject:
+            - 4
+          epochs: 15
+          batch_size: 128
+          lr: 0.0002
+          weight_decay: 0.0001
+          loss: huber
+          grad_clip: 1.0
+          seed: 0
+    outs:
+    - path: runs/cross_subject/best_model.pt
+      hash: md5
+      md5: 1320571fcaf833dd9eff081d1236befb
+      size: 2253429
+    - path: runs/cross_subject/history.csv
+      hash: md5
+      md5: b7aeba9fe5c014f73ea028d023b95e30
+      size: 3669
+    - path: runs/cross_subject/metrics.json
+      hash: md5
+      md5: 7086bb1e0f30be7d26776d673362e652
+      size: 465
+    - path: runs/cross_subject/probes
+      hash: md5
+      md5: e74079551e130fb97888fa5caf12a5af.dir
+      size: 413936
+      nfiles: 8

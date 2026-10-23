@@ -14,6 +14,8 @@ dependencies = [
     "matplotlib>=3.7",
     "pyyaml>=6.0",
     "dvc[s3]>=3.50",
+    "pyriemann>=0.6",
+    "mne>=1.5",
 ]
 
 [project.optional-dependencies]
