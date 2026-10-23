@@ -4,3 +4,16 @@ outs:
   nfiles: 10
   hash: md5
   path: emg_fk
+  desc: EMG-FK dataset downsampled from 500 Hz to 200 Hz containing 5 subjects
+    (10 recordings)
+  meta:
+    dataset: EMG-FK
+    sampling_rate_hz: 200
+    source_sampling_rate_hz: 500
+    downsampling_method: polyphase rational resampling (up=2, down=5)
+    num_subjects: 5
+    subjects: [1, 2, 3, 4, 5]
+    trials_per_subject: 2
+    total_recordings: 10
+    channels: 8
+    targets: 15

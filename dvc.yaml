@@ -1,6 +1,7 @@
 stages:
   build_dataset:
     cmd: python scripts/build_dataset.py
+    desc: Build windowed dataset from 200 Hz EMG-FK recordings across 5 subjects with per-participant standardization
     deps:
       - ${dataset.raw_dir}
       - scripts/build_dataset.py

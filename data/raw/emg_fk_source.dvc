@@ -4,3 +4,14 @@ outs:
   nfiles: 5
   hash: md5
   path: emg_fk_source
+  desc: Raw EMG-FK dataset FIF recordings at original 500 Hz containing 5
+    subjects
+  meta:
+    dataset: EMG-FK
+    source: Zenodo (record 19453843)
+    sampling_rate_hz: 500
+    num_subjects: 5
+    subjects: [1, 2, 3, 4, 5]
+    total_recordings: 5
+    channels: 8
+    targets: 15

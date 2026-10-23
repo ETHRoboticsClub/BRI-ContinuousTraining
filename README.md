@@ -61,6 +61,11 @@ Each recording is one `.npz` file in `data/raw/<name>/`:
 Add new data with `dvc add data/raw/<name> && git add data/raw/<name>.dvc && dvc push`.
 Splits use the metadata (`dataset.test`, `train.val`), never random windows, because windows overlap.
 
+### Available Datasets (DVC)
+
+- **EMG-FK 200 Hz** (`data/raw/emg_fk.dvc`): Forearm EMG (8 channels) and finger joint angles (15 degrees of freedom) from the **EMG-FK dataset** (Colot et al., 2026), downsampled from **500 Hz to 200 Hz** with polyphase anti-aliasing. Contains **5 subjects** (Subjects 01 to 05), 2 trials each (10 recordings total).
+- **EMG-FK Source** (`data/raw/emg_fk_source.dvc`): Original raw 500 Hz `.fif` recordings for Subjects 01 to 05 from Zenodo record 19453843.
+
 ## Changing the model
 
 1. Edit `Model` in `src/model.py`. It receives `(in_channels, out_dim, **params["model"])`
