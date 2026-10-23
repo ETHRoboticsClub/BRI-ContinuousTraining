@@ -110,8 +110,8 @@ stages:
       size: 3656
     - path: runs/cross_subject/metrics.json
       hash: md5
-      md5: 74df94c2645d61e78995047ca77559a0
-      size: 469
+      md5: 3e7c5db173143700f51d03fd8b71fbd1
+      size: 470
     - path: runs/cross_subject/probes
       hash: md5
       md5: 9d7a763e33a3494760b86f7b770e4ff7.dir
