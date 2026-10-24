@@ -9,26 +9,27 @@ from src.preprocessing import preprocess
 from src.trainer import set_seed, train
 
 
-def write_recordings(raw_dir, fs=2048, seconds=3, channels=8, targets=3):
+def write_recordings(raw_dir, fs=2000, seconds=3, channels=8, targets=3):
     rng = np.random.default_rng(0)
     raw_dir.mkdir(parents=True)
     mixing = rng.uniform(0, 1, (channels, targets))
     t = np.arange(fs * seconds) / fs
-    for session in (1, 2):
-        for trial in (1, 2, 3, 4):
+    for movement in (1, 2):
+        for repetition in range(1, 7):
             freq, phase = rng.uniform(0.1, 0.5, (targets, 1)), rng.uniform(0, 2 * np.pi, (targets, 1))
             act = 0.5 + 0.5 * np.sin(2 * np.pi * freq * t + phase)
             emg = mixing @ (act * rng.standard_normal(act.shape)) + 0.05 * rng.standard_normal((channels, len(t)))
             np.savez(
-                raw_dir / f"s{session}_t{trial}.npz",
+                raw_dir / f"m{movement}_r{repetition}.npz",
                 emg=emg.astype(np.float32),
                 fs=fs,
                 channel_names=[f"ch{i}" for i in range(channels)],
                 targets=act.astype(np.float32),
                 target_names=[f"actuator_{i}" for i in range(targets)],
                 meta_subject=1,
-                meta_session=session,
-                meta_trial=trial,
+                meta_exercise=1,
+                meta_movement=movement,
+                meta_repetition=repetition,
             )
 
 

@@ -12,7 +12,6 @@ so branches stay easy to compare and to merge.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pre-commit install
 dvc pull
 ```
 
@@ -59,6 +58,19 @@ Each recording is one `.npz` file in `data/raw/<name>/`:
 | `meta_<key>`    | scalar   | int, for every key in `dataset.meta_keys`        |
 
 Add new data with `dvc add data/raw/<name> && git add data/raw/<name>.dvc && dvc push`.
+
+### NinaPro DB2
+
+The current dataset is [NinaPro DB2](https://ninapro.hevs.ch/instructions/DB2.html), subjects 1-10, converted by
+`scripts/fetch_ninapro.py` (`dvc pull` is enough to get it):
+
+- `emg`: 12 Delsys electrodes at 2 kHz.
+- `targets`: the 22 CyberGlove sensors, scaled per subject to [0, 1] between their 1st and 99th percentiles.
+- One file per movement repetition (`data/raw/ninapro_db2/s<subject>/e<exercise>_m<movement>_r<repetition>.npz`),
+  exercises 1 and 2 only (exercise 3 has no glove).
+- Test set: repetitions 2 and 5 (the standard NinaPro split), validation: repetition 4.
+
+More subjects: `python scripts/fetch_ninapro.py --subjects 11-40`, then `dvc add data/raw/ninapro_db2` and `dvc push`.
 Splits use the metadata (`dataset.test`, `train.val`), never random windows, because windows overlap.
 
 ## Changing the model

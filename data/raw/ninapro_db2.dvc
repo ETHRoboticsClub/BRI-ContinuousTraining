@@ -1,0 +1,6 @@
+outs:
+- md5: a6e6de78f2983b333b286b2c87cb38a7.dir
+  size: 5898749968
+  nfiles: 2400
+  hash: md5
+  path: ninapro_db2

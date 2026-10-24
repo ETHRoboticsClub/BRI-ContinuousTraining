@@ -1,0 +1,104 @@
+schema: '2.0'
+stages:
+  build_dataset:
+    cmd: python scripts/build_dataset.py
+    deps:
+    - path: data/raw/ninapro_db2
+      hash: md5
+      md5: a6e6de78f2983b333b286b2c87cb38a7.dir
+      size: 5898749968
+      nfiles: 2400
+    - path: scripts/build_dataset.py
+      hash: md5
+      md5: bc929fce99d22c152e30c71d71fa5b5e
+      size: 207
+    - path: src/dataset.py
+      hash: md5
+      md5: 70dfea55cfa84eaa5c4502109e8bd70a
+      size: 4365
+    - path: src/preprocessing.py
+      hash: md5
+      md5: 6f26b82b129006c9566ac84556d6075a
+      size: 869
+    params:
+      params.yaml:
+        dataset:
+          raw_dir: data/raw/ninapro_db2
+          out_dir: data/processed/default
+          meta_keys:
+          - subject
+          - exercise
+          - movement
+          - repetition
+          test:
+            repetition:
+            - 2
+            - 5
+          window: 200
+          stride: 100
+          skip_start: 0.25
+        preprocessing:
+          fs: 2000
+          bandpass:
+          - 20
+          - 450
+          notch: 50
+          downsample: 2
+    outs:
+    - path: data/processed/default
+      hash: md5
+      md5: 0c46611294b0a7b99ced6894f9cbc06f.dir
+      size: 2008138109
+      nfiles: 8
+  train:
+    cmd: python scripts/train.py
+    deps:
+    - path: data/processed/default
+      hash: md5
+      md5: 0c46611294b0a7b99ced6894f9cbc06f.dir
+      size: 2008138109
+      nfiles: 8
+    - path: scripts/train.py
+      hash: md5
+      md5: f8f971ba809f0a80b9c26676c08c7933
+      size: 656
+    - path: src
+      hash: md5
+      md5: a465389c982e60afed1f0b053eea5ca9.dir
+      size: 22007
+      nfiles: 7
+    params:
+      params.yaml:
+        model:
+          hidden: 32
+          layers: 3
+          kernel_size: 5
+          dropout: 0.1
+        train:
+          out_dir: runs/default
+          val:
+            repetition:
+            - 4
+          epochs: 20
+          batch_size: 128
+          lr: 0.001
+          weight_decay: 0.0001
+          seed: 0
+    outs:
+    - path: runs/default/best_model.pt
+      hash: md5
+      md5: 7f66b524f50454a9b35f3163721ad794
+      size: 60469
+    - path: runs/default/history.csv
+      hash: md5
+      md5: 274332d15f7daadd20c49a1d1966fb68
+      size: 4241
+    - path: runs/default/metrics.json
+      hash: md5
+      md5: 21dbbbb8c60d67bbc9549c645314ba48
+      size: 455
+    - path: runs/default/probes
+      hash: md5
+      md5: 8607553f0f0257c0618780ec4a760860.dir
+      size: 720241
+      nfiles: 9

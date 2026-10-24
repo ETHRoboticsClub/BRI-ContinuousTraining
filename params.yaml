@@ -1,14 +1,14 @@
 dataset:
-  raw_dir: data/raw/recordings
+  raw_dir: data/raw/ninapro_db2   # NinaPro DB2, see scripts/fetch_ninapro.py
   out_dir: data/processed/default
-  meta_keys: [subject, session, trial]
-  test: {session: [2]}      # recordings held out for the final test
+  meta_keys: [subject, exercise, movement, repetition]
+  test: {repetition: [2, 5]}      # recordings held out for the final test (NinaPro standard split)
   window: 200               # samples after preprocessing
-  stride: 50
+  stride: 100
   skip_start: 0.25          # seconds dropped at the start of each recording
 
 preprocessing:              # arguments of src/preprocessing.py:preprocess
-  fs: 2048
+  fs: 2000
   bandpass: [20, 450]
   notch: 50
   downsample: 2
@@ -21,7 +21,7 @@ model:                      # arguments of src/model.py:Model
 
 train:
   out_dir: runs/default
-  val: {trial: [4]}         # taken out of the train recordings for model selection
+  val: {repetition: [4]}    # taken out of the train recordings for model selection
   epochs: 20
   batch_size: 128
   lr: 0.001

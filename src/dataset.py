@@ -51,14 +51,17 @@ def build_dataset(params, preprocess):
     X, y, meta = np.concatenate(X), np.concatenate(y), np.concatenate(meta).astype(np.int32)
 
     is_test = select(meta, meta_keys, cfg["test"])
-    mean = X[~is_test].mean(axis=(0, 2), keepdims=True)[0]
-    std = X[~is_test].std(axis=(0, 2), keepdims=True)[0] + 1e-6
-    X = (X - mean) / std
+    train = X[~is_test]
+    mean = train.mean(axis=(0, 2), keepdims=True)[0]
+    std = train.std(axis=(0, 2), keepdims=True)[0] + 1e-6
+    del train
+    X -= mean  # in place: X can be several GB
+    X /= std
 
     out = Path(cfg["out_dir"])
     for split, mask in (("train", ~is_test), ("test", is_test)):
         (out / split).mkdir(parents=True, exist_ok=True)
-        np.save(out / split / "X.npy", X[mask].astype(np.float32))
+        np.save(out / split / "X.npy", X[mask])
         np.save(out / split / "y.npy", y[mask])
         np.save(out / split / "meta.npy", meta[mask])
     np.savez(out / "stats.npz", mean=mean, std=std)
