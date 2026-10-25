@@ -3,117 +3,74 @@ stages:
   build_dataset:
     cmd: python scripts/build_dataset.py
     deps:
-    - path: data/raw/emg_fk
-      hash: md5
-      md5: 1cd9d9284f649bcff95838baa300cb43.dir
-      size: 668713540
-      nfiles: 40
     - path: scripts/build_dataset.py
       hash: md5
-      md5: 109da0d2ef3c5e79f1a434d99e67ef65
-      size: 215
+      md5: 3b1a3991ee4542a67adc55a204854d38
+      size: 2302
     - path: src/dataset.py
       hash: md5
-      md5: e1294c1f5de6312b74e26b5da2077a5c
-      size: 5233
-    - path: src/preprocessing.py
+      md5: de1e67cfdac558f3a872897551c78df0
+      size: 823
+    - path: src/preprocess.py
       hash: md5
-      md5: 9e00333cc969eb5d1d80900aa49ffb65
-      size: 11839
+      md5: 3cf8166aa3615ea16c221382d0414575
+      size: 620
     params:
-      params.yaml:
-        dataset:
-          raw_dir: data/raw/emg_fk
-          out_dir: data/processed/emg_fk_cross_sub
-          meta_keys:
-          - subject
-          - session
-          - trial
-          test:
-            subject:
-            - 20
-          normalize_per: subject
-          window: 240
-          stride: 40
-          skip_start: 0.25
+      src/params.yaml:
         preprocessing:
           fs: 200
           bandpass:
           - 15
           - 95
           notch: 50
-          downsample: 1
-          multiband: false
-          bands:
-          - - 15
-            - 35
-          - - 35
-            - 65
-          - - 65
-            - 95
     outs:
-    - path: data/processed/emg_fk_cross_sub
+    - path: data/processed/emg_fk
       hash: md5
-      md5: 457f71cdb9163df7e00139111d96d953.dir
-      size: 1406338698
-      nfiles: 8
+      md5: 0d261d91551823f71576a352b64ec0a6.dir
+      size: 1406657532
+      nfiles: 3
   train:
     cmd: python scripts/train.py
     deps:
-    - path: data/processed/emg_fk_cross_sub
+    - path: data/processed/emg_fk
       hash: md5
-      md5: 457f71cdb9163df7e00139111d96d953.dir
-      size: 1406338698
-      nfiles: 8
+      md5: 0d261d91551823f71576a352b64ec0a6.dir
+      size: 1406657532
+      nfiles: 3
     - path: scripts/train.py
       hash: md5
-      md5: c2e056f42bdf9f124bd76cefe39f9e2d
-      size: 2288
-    - path: src
+      md5: 2206280fb5aa295ae9b4017e4f580d9d
+      size: 2520
+    - path: src/dataset.py
       hash: md5
-      md5: 30f3c91820eb3058cd61f57b5232ee25.dir
-      size: 47129
-      nfiles: 7
+      md5: de1e67cfdac558f3a872897551c78df0
+      size: 823
+    - path: src/model
+      hash: md5
+      md5: bb280f59a9d8571613df6ebab2db4539.dir
+      size: 3208
+      nfiles: 4
+    - path: src/trainer.py
+      hash: md5
+      md5: fc29b467fffdfbbc913a60d993bfa9aa
+      size: 2071
     params:
-      params.yaml:
-        model:
-          hidden_dense: 256
-          gru_units:
-          - 256
-          - 128
-          dense_units: 64
-          dropout: 0.1
-          n_sub_windows: 10
-          n_bands: 1
-          activation: linear
+      src/params.yaml:
         train:
-          out_dir: runs/cross_subject
-          val:
-            subject:
-            - 19
+          val_subjects:
+          - 19
+          test_subjects:
+          - 20
           epochs: 15
           batch_size: 256
           lr: 0.0002
           weight_decay: 0.0001
-          loss: huber
           grad_clip: 1.0
           seed: 0
           device: cuda
     outs:
-    - path: runs/cross_subject/best_model.pt
+    - path: output
       hash: md5
-      md5: f2d423283ddb301b6ee81d41a6aea240
-      size: 2252194
-    - path: runs/cross_subject/history.csv
-      hash: md5
-      md5: 8334d19593b343e0963a4d8e02036b58
-      size: 3656
-    - path: runs/cross_subject/metrics.json
-      hash: md5
-      md5: 3e7c5db173143700f51d03fd8b71fbd1
-      size: 470
-    - path: runs/cross_subject/probes
-      hash: md5
-      md5: 9d7a763e33a3494760b86f7b770e4ff7.dir
-      size: 539855
-      nfiles: 8
+      md5: 1d157f1ab32947f4c8bef1895826e14e.dir
+      size: 2254529
+      nfiles: 3
