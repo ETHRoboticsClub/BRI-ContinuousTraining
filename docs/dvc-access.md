@@ -69,22 +69,15 @@ git pull
 dvc pull
 ```
 
-**Add a new dataset**
-
-```bash
-# put the files in data/raw/<name>/ first
-dvc add data/raw/<name>
-git add data/raw/<name>.dvc data/raw/.gitignore
-git commit -m "Add <name>"
-dvc push        # upload the data
-git push        # share the pointer
-```
+Raw data is not tracked by DVC: `scripts/build_dataset.py` downloads it from Zenodo. What DVC versions is the
+built dataset (`data/processed/emg_fk`) and the training output (`output/`), through `dvc.lock`.
+Only `dvc add` raw data that cannot be downloaded again (e.g. your own recordings).
 
 **Run the pipeline and share the results**
 
 ```bash
 dvc repro                   # rebuild dataset + train, only what changed
-git add dvc.lock params.yaml
+git add dvc.lock src/params.yaml
 git commit -m "Train with ..."
 dvc push
 git push
@@ -94,9 +87,7 @@ git push
 
 1. **Always `dvc push` before `git push`.** If you push the git commit without the data, everyone else's `dvc pull`
    fails with "missing cache files".
-2. **`dvc add` new data before any `git add`.** Raw data folders are only ignored by git after `dvc add` has run on them,
-   so `git add .` before that would commit the data into git.
-3. Optional: run `dvc install` once in the repo. It adds git hooks so `git push` also runs `dvc push`, and
+2. Optional: run `dvc install` once in the repo. It adds git hooks so `git push` also runs `dvc push`, and
    `git checkout` also updates the data.
 
 ## Training on a GPU (SkyPilot)
@@ -107,13 +98,13 @@ It copies your `~/.aws/credentials` to the machine, so step 2 above must be done
 ```bash
 sky launch -c hri-gpu-<yourname> sky/train.yaml --env SMOKE_TEST=1   # once: create the machine + check GPU/S3
 sky exec hri-gpu-<yourname> sky/train.yaml                           # each run: syncs your local code, trains
-sky/fetch.sh hri-gpu-<yourname>                                      # brings dvc.lock + metrics back, pulls the model
+sky/fetch.sh hri-gpu-<yourname>                                      # brings dvc.lock back, pulls output/
 git add dvc.lock && git commit -m "..." && git push
 ```
 
 The machine stops by itself after 30 idle minutes (`sky start hri-gpu-<yourname>` to resume, packages stay installed).
 It costs about $1/h while running. Use `sky down hri-gpu-<yourname>` when you won't need it for a while.
-Change parameters by editing `params.yaml` locally before `sky exec`.
+Change parameters by editing `src/params.yaml` locally before `sky exec`.
 
 ## Troubleshooting
 
@@ -122,6 +113,6 @@ Change parameters by editing `params.yaml` locally before `sky exec`.
 | `Unable to locate credentials` / `NoCredentials` | Step 2 not done, or the profile isn't named `hri`. Check with `aws configure list --profile hri`. |
 | `AccessDenied` on `hri-control` | Your user isn't in the `hri-user` group yet, so ask Marcos. (`s3 ls` with no bucket name is always denied; that's expected.) |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | Key or secret mistyped. Run `aws configure --profile hri` again. |
-| `dvc pull`: `No file hash info found for data/processed/...` or `runs/...` | The pipeline outputs haven't been pushed for this commit yet. Run `dvc repro` yourself, or ask whoever trained it to `dvc push`. |
+| `dvc pull`: `No file hash info found for data/processed/...` or `output` | The pipeline outputs haven't been pushed for this commit yet. Run `dvc repro` yourself, or ask whoever trained it to `dvc push`. |
 | `dvc pull`: `missing cache files` for other paths | Someone pushed git without `dvc push`. Ask them to run `dvc push`. |
 | I want to use a different AWS profile name | `dvc remote modify --local storage profile <name>` (stays on your machine and isn't committed). |

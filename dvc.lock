@@ -1,0 +1,76 @@
+schema: '2.0'
+stages:
+  build_dataset:
+    cmd: python scripts/build_dataset.py
+    deps:
+    - path: scripts/build_dataset.py
+      hash: md5
+      md5: 3b1a3991ee4542a67adc55a204854d38
+      size: 2302
+    - path: src/dataset.py
+      hash: md5
+      md5: de1e67cfdac558f3a872897551c78df0
+      size: 823
+    - path: src/preprocess.py
+      hash: md5
+      md5: 3cf8166aa3615ea16c221382d0414575
+      size: 620
+    params:
+      src/params.yaml:
+        preprocessing:
+          fs: 200
+          bandpass:
+          - 15
+          - 95
+          notch: 50
+    outs:
+    - path: data/processed/emg_fk
+      hash: md5
+      md5: 0d261d91551823f71576a352b64ec0a6.dir
+      size: 1406657532
+      nfiles: 3
+  train:
+    cmd: python scripts/train.py
+    deps:
+    - path: data/processed/emg_fk
+      hash: md5
+      md5: 0d261d91551823f71576a352b64ec0a6.dir
+      size: 1406657532
+      nfiles: 3
+    - path: scripts/train.py
+      hash: md5
+      md5: 2206280fb5aa295ae9b4017e4f580d9d
+      size: 2520
+    - path: src/dataset.py
+      hash: md5
+      md5: de1e67cfdac558f3a872897551c78df0
+      size: 823
+    - path: src/model
+      hash: md5
+      md5: bb280f59a9d8571613df6ebab2db4539.dir
+      size: 3208
+      nfiles: 4
+    - path: src/trainer.py
+      hash: md5
+      md5: fc29b467fffdfbbc913a60d993bfa9aa
+      size: 2071
+    params:
+      src/params.yaml:
+        train:
+          val_subjects:
+          - 19
+          test_subjects:
+          - 20
+          epochs: 15
+          batch_size: 256
+          lr: 0.0002
+          weight_decay: 0.0001
+          grad_clip: 1.0
+          seed: 0
+          device: cuda
+    outs:
+    - path: output
+      hash: md5
+      md5: 1d157f1ab32947f4c8bef1895826e14e.dir
+      size: 2254529
+      nfiles: 3

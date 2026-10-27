@@ -10,4 +10,4 @@ __pycache__/
 .dvc/tmp/
 data/raw/*/
 data/processed/
-runs/
+output/

@@ -2,32 +2,32 @@ stages:
   build_dataset:
     cmd: python scripts/build_dataset.py
     deps:
-      - ${dataset.raw_dir}
       - scripts/build_dataset.py
       - src/dataset.py
-      - src/preprocessing.py
+      - src/preprocess.py
     params:
-      - dataset
-      - preprocessing
+      - src/params.yaml:
+          - preprocessing
     outs:
-      - ${dataset.out_dir}
+      - data/processed/emg_fk
 
   train:
     cmd: python scripts/train.py
     deps:
-      - ${dataset.out_dir}
+      - data/processed/emg_fk
       - scripts/train.py
-      - src
+      - src/dataset.py
+      - src/model
+      - src/trainer.py
     params:
-      - model
-      - train
+      - src/params.yaml:
+          - train
     outs:
-      - ${train.out_dir}/best_model.pt
-      - ${train.out_dir}/probes
-    metrics:
-      - ${train.out_dir}/metrics.json:
-          cache: false
-    plots:
-      - ${train.out_dir}/history.csv:
-          cache: false
-          x: epoch
+      - output
+
+metrics:
+  - output/metrics.json
+
+plots:
+  - output/history.csv:
+      x: epoch
