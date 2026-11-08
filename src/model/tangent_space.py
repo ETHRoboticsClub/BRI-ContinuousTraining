@@ -1,11 +1,24 @@
 import torch
 from torch import nn
 
+SUB_WINDOW = 60
+STEP = 20
+
+
+def n_steps(raw_samples: int) -> int:
+    """Number of tangent steps in a training example of raw_samples samples (0 if shorter than a sub-window)."""
+    return max(0, (raw_samples - SUB_WINDOW) // STEP + 1)
+
+
+def raw_length(steps: int) -> int:
+    """Raw samples in a training example with the given number of tangent steps."""
+    return SUB_WINDOW + (steps - 1) * STEP
+
 
 class TangentSpace(nn.Module):
     """Covariance of causal sub-windows, shrunk with OAS and mapped to the tangent space at the identity."""
 
-    def __init__(self, channels, sub_window=60, step=20) -> None:
+    def __init__(self, channels, sub_window=SUB_WINDOW, step=STEP) -> None:
         super().__init__()
         self.sub_window, self.step = sub_window, step
         row, col = torch.triu_indices(channels, channels)
