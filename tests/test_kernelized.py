@@ -98,7 +98,10 @@ def test_causal(backend):
     x = 0.1 * rng.standard_normal((2, 10, 6)).astype(np.float32)
     x2 = x.copy()
     x2[:, 7:] += 0.1 * rng.standard_normal(x2[:, 7:].shape).astype(np.float32)
-    assert_allclose(layer.forward(x)[:, :7], layer.forward(x2)[:, :7], atol=1e-6)
+    y, y2 = layer.forward(x), layer.forward(x2)
+    assert_allclose(y[:, :7], y2[:, :7], atol=1e-6)
+    # the perturbation must be visible at and after step 7, so a constant (e.g. zero) output cannot pass
+    assert np.abs(y2[:, 7:] - y[:, 7:]).max() > 1e-3
 
 
 @backend_param
