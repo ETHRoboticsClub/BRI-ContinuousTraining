@@ -52,3 +52,20 @@ class Kernelized(nn.Module):
         K = torch.exp(lags[None, :] * dtA[:, None]).real
         y = torch.fft.irfft(torch.fft.rfft(x, n=2 * T) * torch.fft.rfft(K, n=2 * T), n=2 * T)[..., :T]
         return torch.einsum("bnl,nd->bld", y, self.C)
+
+
+class KernelizedLinear(nn.Module):
+    """Memoryless linear projection: the Kernelized SSM with A_hat = 0, B_hat = I, D = 0.
+
+    Each step computes ``u @ C``; the state size equals the input width. The MetaTF reference is
+    ``StatefulProjection(use_bias=False)``.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        a = math.sqrt(6 / (in_channels + out_channels))
+        self.C = nn.Parameter(torch.empty(in_channels, out_channels).uniform_(-a, a))
+
+    def forward(self, u: torch.Tensor) -> torch.Tensor:
+        """[..., in] -> [..., out]."""
+        return u @ self.C
