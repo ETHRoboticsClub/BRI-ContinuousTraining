@@ -258,15 +258,18 @@ def test_step_helpers():
     assert (n_steps(240), n_steps(1040), n_steps(64), n_steps(59)) == (10, 50, 1, 0)
     assert (raw_length(10), raw_length(50)) == (240, 1040)
 
+
 @pytest.mark.parametrize("k", [1, 5])
 @pytest.mark.parametrize("act", ["tanh", "relu"])
 def test_model_output_shape(k, act):
     model = Model(8, 15, 10 * k, act)
     assert model(torch.randn(4, 8, raw_length(10 * k))).shape == (4, 15)
 
+
 def test_model_has_no_bias():
     names = [n for n, _ in Model(8, 15, 10).named_parameters()]
     assert not any("bias" in n for n in names)
+
 
 def test_activation_variant_is_used_everywhere():
     for act, cls in [("tanh", nn.Tanh), ("relu", nn.ReLU)]:
@@ -274,11 +277,16 @@ def test_activation_variant_is_used_everywhere():
         assert sum(isinstance(m, cls) for m in mods) == 4
         assert not any(isinstance(m, nn.Tanh if cls is nn.ReLU else nn.ReLU) for m in mods)
 
+
 def test_unknown_activation_raises():
-    with pytest.raises(ValueError): Model(8, 15, 10, "gelu")
+    with pytest.raises(ValueError):
+        Model(8, 15, 10, "gelu")
+
 
 def test_model_rejects_wrong_length():
-    with pytest.raises(ValueError): Model(8, 15, 50)(torch.randn(2, 8, 240))
+    with pytest.raises(ValueError):
+        Model(8, 15, 50)(torch.randn(2, 8, 240))
+
 
 def test_layer_widths():
     m = Model(8, 15, 10)
@@ -409,9 +417,10 @@ git commit -m "feat: store continuous recordings, slice training examples by len
 
 ```python
 def test_evaluate_metrics():
-    y = torch.tensor([[0.0, 10.0], [2.0, 14.0]]); pred = torch.tensor([[1.0, 10.0], [2.0, 10.0]])
+    y = torch.tensor([[0.0, 10.0], [2.0, 14.0]])
+    pred = torch.tensor([[1.0, 10.0], [2.0, 10.0]])
     loader = [(torch.zeros(2, 1), y)]
-    m = evaluate(ConstModel(pred), loader, "cpu")           # ConstModel returns pred regardless of input
+    m = evaluate(ConstModel(pred), loader, "cpu")  # ConstModel returns pred regardless of input
     assert m["mae"] == pytest.approx((1 + 0 + 0 + 4) / 4)
     assert m["nmse"] == pytest.approx(1 - m["r2"])
     assert m["nmse"] == pytest.approx(((0.5 / 1.0) + (8.0 / 4.0)) / 2)
@@ -462,6 +471,7 @@ def test_run_writes_aggregate_metrics(tmp_path):
         assert m[split]["mae"]["mean"] == pytest.approx(np.mean([m["seeds"][s][split]["mae"] for s in ("0", "1")]))
     assert json.loads((tmp_path / "out/metrics.json").read_text()) == m
     assert (tmp_path / "out/seed_0/best_model.pt").exists()
+
 
 def test_eval_sets_use_stride_40(tmp_path):
     _, _, val_loader, test_loader = load_data({**params, "example_stride": 1040}, data_dir, 240)
@@ -524,7 +534,10 @@ def test_select_uses_validation_not_test():
     rows = [{"val.mae.mean": 17.0, "test.mae.mean": 15.0}, {"val.mae.mean": 16.0, "test.mae.mean": 18.0}]
     assert select(rows) is rows[1]
 
-@pytest.mark.parametrize("mae,expected", [(16.70, "success"), (16.71, "threshold"), (17.21, "threshold"), (17.22, "miss")])
+
+@pytest.mark.parametrize(
+    "mae,expected", [(16.70, "success"), (16.71, "threshold"), (17.21, "threshold"), (17.22, "miss")]
+)
 def test_verdict(mae, expected):
     assert verdict(mae) == expected
 ```
