@@ -1,7 +1,9 @@
 """Testbench for Kernelized / KernelizedLinear, run against MetaTF and PyTorch.
 
 Every expected value comes from the MetaTF fixtures in ``tests/fixtures`` (see make_kernelized_fixtures.py) or
-from properties of MetaTF's layers. No torch or TensorFlow import happens here; the adapters in
+from properties of MetaTF's layers. The float64 reference stored in the Kernelized fixtures is used only to size
+MetaTF's own float32 rounding error (the floors in the forward/gradient tests); the fixture script gates it against
+MetaTF, so it never replaces MetaTF as the expected value. No torch or TensorFlow import happens here; the adapters in
 ``kernelized_backends`` do that lazily.
 """
 
@@ -68,25 +70,60 @@ def test_zoh_matches_metatf(backend, name):
     assert_allclose(dta, fx["zoh_dtA"], rtol=1e-5, atol=1e-6)
 
 
+def assert_close(actual, expected, rtol, atol, floor, err_msg=""):
+    """|actual - expected| <= max(atol + rtol*|expected|, floor) elementwise."""
+    actual, expected = np.asarray(actual, dtype=np.float64), np.asarray(expected, dtype=np.float64)
+    excess = np.abs(actual - expected) - np.maximum(atol + rtol * np.abs(expected), floor)
+    assert excess.max() <= 0, f"{err_msg}: max abs error {np.abs(actual - expected).max():.3e}, floor {floor:.3e}"
+
+
+GRAD_KEYS = ("x", "A", "B", "C", "log_dt")
+
+
+def configured_layer(backend, fx):
+    layer = build_kernelized(backend, fx)
+    layer.set_weights(fx["A"], fx["B"], fx["C"], fx["log_dt"])
+    return layer
+
+
+# Roundoff in float32/complex64 (phase arguments reach thousands of rad) makes MetaTF itself differ from the exact
+# result by err_*. A backend within err_* of exact is within 2*err_* of MetaTF (triangle inequality): the 2x floors.
+
+
 @backend_param
 @kernelized_param
 def test_forward_matches_metatf(backend, name):
     fx = load("kernelized", name)
-    layer = build_kernelized(backend, fx)
-    layer.set_weights(fx["A"], fx["B"], fx["C"], fx["log_dt"])
-    assert_allclose(layer.forward(fx["x"]), fx["y_state"], rtol=1e-4, atol=1e-5)
-    assert_allclose(layer.forward_full(fx["x"]), fx["y_full"], rtol=1e-4, atol=1e-5)
+    layer = configured_layer(backend, fx)
+    assert_close(layer.forward(fx["x"]), fx["y_state"], 1e-4, 1e-5, 2 * fx["err_y_state"], "forward")
+    assert_close(layer.forward_full(fx["x"]), fx["y_full"], 1e-4, 1e-5, 2 * fx["err_y_full"], "forward_full")
+
+
+@backend_param
+@kernelized_param
+def test_forward_as_accurate_as_metatf(backend, name):
+    fx = load("kernelized", name)
+    layer = configured_layer(backend, fx)
+    assert_close(layer.forward(fx["x"]), fx["y_exact"], 1e-4, 1e-5, fx["err_y_state"], "forward")
+    assert_close(layer.forward_full(fx["x"]), fx["y_exact"], 1e-4, 1e-5, fx["err_y_full"], "forward_full")
 
 
 @backend_param
 @kernelized_param
 def test_gradients_match_metatf(backend, name):
     fx = load("kernelized", name)
-    layer = build_kernelized(backend, fx)
-    layer.set_weights(fx["A"], fx["B"], fx["C"], fx["log_dt"])
-    grads = layer.grads(fx["x"], fx["g"])
-    for key in ("x", "A", "B", "C", "log_dt"):
-        assert_allclose(grads[key], fx[f"grad_{key}"], rtol=1e-3, atol=1e-4, err_msg=key)
+    grads = configured_layer(backend, fx).grads(fx["x"], fx["g"])
+    for key in GRAD_KEYS:
+        assert_close(grads[key], fx[f"grad_{key}"], 1e-3, 1e-4, 2 * fx[f"err_grad_{key}"], key)
+
+
+@backend_param
+@kernelized_param
+def test_gradients_as_accurate_as_metatf(backend, name):
+    fx = load("kernelized", name)
+    grads = configured_layer(backend, fx).grads(fx["x"], fx["g"])
+    for key in GRAD_KEYS:
+        assert_close(grads[key], fx[f"grad_exact_{key}"], 1e-3, 1e-4, fx[f"err_grad_{key}"], key)
 
 
 @backend_param

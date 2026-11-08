@@ -28,6 +28,8 @@ sys.path.insert(0, str(HERE.parent))
 
 from kernelized_backends import kernelized, projection, zoh  # noqa: E402
 
+REL_ERR_GATE = 1e-4
+
 SOURCE = "akida_models 1.14.2 custom_layers.Kernelized; quantizeml 1.2.5 StatefulProjection(use_bias=False)"
 
 # name: (in, out, num_coeffs, repeat, speed, speed_range, length, batch)
@@ -52,6 +54,36 @@ def seed():
     tf.random.set_seed(0)
 
 
+def exact_forward_and_grads(A, B, C, log_dt, x, g):
+    """Kernelized forward pass and gradients of sum(y * g) in float64/complex128, from MetaTF's own math.
+
+    y[b,t] = sum_{s<=t} x[b,s] @ (B_hat * Re(exp((t-s) * dtA))) @ C, with dt = exp(log_dt), dtA = dt * (-exp(A[:,0])
+    + i A[:,1]) and B_hat = dt * B (zoh_discretize). The convolution is a direct sum over lags, not an FFT, so
+    this shares no code path with either backend.
+    """
+    import tensorflow as tf
+
+    v = {k: tf.Variable(a.astype(np.float64)) for k, a in dict(A=A, B=B, C=C, log_dt=log_dt).items()}
+    xt = tf.constant(x.astype(np.float64))
+    gt = tf.constant(g.astype(np.float64))
+    length = x.shape[1]
+    with tf.GradientTape() as tape:
+        tape.watch(xt)
+        dt = tf.exp(v["log_dt"])
+        dtA = tf.cast(dt, tf.complex128) * tf.complex(-tf.exp(v["A"][:, 0]), v["A"][:, 1])
+        b_hat = dt * v["B"]
+        y = tf.zeros((x.shape[0], length, C.shape[1]), tf.float64)
+        for lag in range(length):
+            k = tf.math.real(tf.exp(tf.cast(lag, tf.complex128) * dtA))
+            kernel = tf.einsum("cn,nd,n->cd", b_hat, v["C"], k)
+            shifted = tf.einsum("blc,cd->bld", xt[:, : length - lag], kernel)
+            y += tf.pad(shifted, [[0, 0], [lag, 0], [0, 0]])
+        loss = tf.reduce_sum(y * gt)
+    names = ["A", "B", "C", "log_dt"]
+    grads = tape.gradient(loss, [xt] + [v[n] for n in names])
+    return y.numpy(), {k: gr.numpy() for k, gr in zip(["x"] + names, grads, strict=True)}
+
+
 def make_kernelized(name, cfg):
     cin, cout, num_coeffs, repeat, speed, speed_range, length, batch = cfg
     seed()
@@ -64,6 +96,20 @@ def make_kernelized(name, cfg):
     g = rng.standard_normal((batch, length, cout)).astype(np.float32)
     grads = layer.grads(x, g)
     a_hat, b_hat, dta = zoh("metatf", w["A"], w["B"], w["log_dt"])
+    y_state, y_full = layer.forward(x), layer.forward_full(x)
+    y_exact, grad_exact = exact_forward_and_grads(w["A"], w["B"], w["C"], w["log_dt"], x, g)
+    # MetaTF's own float32 rounding error, and the gate tying the float64 reference to MetaTF: a wrong formula
+    # would give an O(1) relative error here
+    errs = {
+        "err_y_state": (np.abs(y_state - y_exact).max(), np.abs(y_exact).max()),
+        "err_y_full": (np.abs(y_full - y_exact).max(), np.abs(y_exact).max()),
+        **{f"err_grad_{k}": (np.abs(grads[k] - grad_exact[k]).max(), np.abs(grad_exact[k]).max()) for k in grads},
+    }
+    for key, (err, scale) in errs.items():
+        print(f"{name}: {key} = {err:.3e} (relative {err / scale:.3e})")
+    bad = [k for k, (err, scale) in errs.items() if not err / scale < REL_ERR_GATE]
+    if bad:
+        raise RuntimeError(f"{name}: float64 reference disagrees with MetaTF beyond {REL_ERR_GATE}: {bad}")
     out = {
         "in_channels": cin,
         "out_channels": cout,
@@ -79,9 +125,13 @@ def make_kernelized(name, cfg):
         **w,
         "x": x,
         "g": g,
-        "y_state": layer.forward(x),
-        "y_full": layer.forward_full(x),
+        "y_state": y_state,
+        "y_full": y_full,
         **{f"grad_{k}": v for k, v in grads.items()},
+        # stored as float32 to keep the file under 1 MB; the rounding (~6e-8 relative) is far below MetaTF's error
+        "y_exact": y_exact.astype(np.float32),
+        **{f"grad_exact_{k}": v.astype(np.float32) for k, v in grad_exact.items()},
+        **{k: np.float64(err) for k, (err, _) in errs.items()},
         "zoh_A_hat": a_hat,
         "zoh_B_hat": b_hat,
         "zoh_dtA": dta,
