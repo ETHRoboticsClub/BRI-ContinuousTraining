@@ -1,26 +1,25 @@
-import yaml
+import urllib.request
+from pathlib import Path
+
 import mne
 import numpy as np
-import urllib.request
+import yaml
 from scipy import signal
-from pathlib import Path
-from numpy.lib.stride_tricks import sliding_window_view
 
+from src.dataset import recording_path, save_recording
 from src.preprocess import Preprocess
 
 ZENODO_URL = "https://zenodo.org/records/19453843/files"
 SUBJECTS = range(1, 21)
-WINDOW = 240
-STRIDE = 40
 SKIP_START = 0.25
 
+
 def main(params, raw_dir, out_dir) -> None:
-    """Download the recordings into raw_dir, preprocess them and save their windows to out_dir."""
+    """Download the recordings into raw_dir, preprocess them and save each whole recording to out_dir."""
     raw_dir, out_dir = Path(raw_dir), Path(out_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     preprocess = Preprocess(**params)
-    X, y, subject = [], [], []
     for s in SUBJECTS:
         path = raw_dir / f"Subject_{s:02d}.fif"
         if not path.exists():
@@ -42,15 +41,8 @@ def main(params, raw_dir, out_dir) -> None:
         emg, angles = emg[:, skip:], angles[:, skip:]
         emg = (emg - emg.mean(1, keepdims=True)) / (emg.std(1, keepdims=True) + 1e-6)
 
-        windows = sliding_window_view(emg, WINDOW, axis=1)[:, ::STRIDE].transpose(1, 0, 2)
-        X.append(windows)
-        y.append(angles[:, WINDOW - 1 :: STRIDE].T)
-        subject.append(np.full(len(windows), s))
-        print(f"Subject {s:02d}: {len(windows)} windows")
-
-    np.save(out_dir / "X.npy", np.concatenate(X).astype(np.float32))
-    np.save(out_dir / "y.npy", np.concatenate(y).astype(np.float32))
-    np.save(out_dir / "subject.npy", np.concatenate(subject))
+        save_recording(recording_path(out_dir, s), emg, angles)
+        print(f"Subject {s:02d}: T = {emg.shape[1]} raw samples")
 
 
 if __name__ == "__main__":
