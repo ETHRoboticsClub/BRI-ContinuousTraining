@@ -22,7 +22,7 @@ def train_epoch(model, loader, loss_fn, optimizer, device, grad_clip=None) -> fl
 
 @torch.no_grad()
 def evaluate(model, loader, device) -> dict:
-    """Mean squared error and R² averaged over targets."""
+    """Mean squared error, R², NMSE and MAE (degrees) averaged over targets."""
     model.eval()
     y, pred = [], []
     for xb, yb in loader:
@@ -30,7 +30,13 @@ def evaluate(model, loader, device) -> dict:
         y.append(yb)
     y, pred = torch.cat(y), torch.cat(pred)
     mse = ((pred - y) ** 2).mean(0)
-    return {"mse": mse.mean().item(), "r2": (1 - mse / y.var(0, unbiased=False)).mean().item()}
+    nmse = mse / y.var(0, unbiased=False)
+    return {
+        "mse": mse.mean().item(),
+        "r2": (1 - nmse).mean().item(),
+        "nmse": nmse.mean().item(),
+        "mae": (pred - y).abs().mean().item(),
+    }
 
 
 def fit(model, train_loader, val_loader, loss_fn, optimizer, scheduler, epochs, device, checkpoint, grad_clip=None):
