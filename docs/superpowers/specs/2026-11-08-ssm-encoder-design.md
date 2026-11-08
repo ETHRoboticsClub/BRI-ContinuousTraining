@@ -242,7 +242,13 @@ committed to the repo. CI and the training env never import TensorFlow. Fixtures
 - `StatefulProjection(use_bias=False)` forward outputs and gradients (input and kernel) for several (in, out)
   settings, on 3-D [B, T, in] and 2-D [B, in] inputs.
 
-Tolerance: float32 (e.g. rtol 1e-4, atol 1e-5).
+Tolerance: float32 (e.g. rtol 1e-4, atol 1e-5). For the `Kernelized` forward outputs and gradients, MetaTF's own
+float32/complex64 rounding can exceed that atol (large kernel phase arguments), so those tolerances are sized by it:
+the fixture script also computes a float64 exact reference (direct convolution, not FFT) and records MetaTF's
+error `e` against it, refusing any config where `e / max|exact| >= 1e-4` (this ties the reference to MetaTF).
+PyTorch must then be within `max(original, 2e)` of MetaTF (triangle inequality) and within `max(original, e)` of
+the exact reference (no less accurate than MetaTF). The float64 reference only sizes the tolerance; MetaTF stays
+the reference PyTorch is matched to.
 
 **Testbench (runs on MetaTF and on PyTorch):**
 - `Kernelized` matches every fixture (outputs, gradients, deterministic init, C scale).

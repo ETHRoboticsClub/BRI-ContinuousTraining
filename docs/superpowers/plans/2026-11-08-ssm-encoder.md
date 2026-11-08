@@ -188,7 +188,8 @@ testbench checks against both outputs.
 
 Run: `pytest tests/test_kernelized.py -k "not linear" -v && ruff check . && ruff format --check .`
 Expected: all PASS; ruff clean. (The `linear` tests still fail until Task 3.) If a comparison fails only by float
-noise, stop and report the max error instead of changing the tolerance.
+noise, stop and report the max error instead of changing the tolerance. (Superseded for the `Kernelized` forward and
+gradient tests by Task 1.1 / ledger Ruling 6: those tolerances are sized by MetaTF's measured float32 rounding error.)
 
 - [ ] **Step 4: Commit**
 
