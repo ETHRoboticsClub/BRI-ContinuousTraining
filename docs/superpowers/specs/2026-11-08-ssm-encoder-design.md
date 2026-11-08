@@ -121,9 +121,12 @@ real part of the kernel is used. Precision: float32 / complex64, as in MetaTF.
 
 A Kernelized layer fixed to `Â = 0`, `B̂ = I`, `D = 0`, with only `C` trainable. The state size equals the input
 width. Its kernel is a single tap at lag 0, so `y[t] = u[t] @ C`: a bias-free linear map applied per tangent
-step. `C` has shape (in, out), initialized `randn · √(2/in)` (MetaTF's C init with N = in; my call). On Akida
-this corresponds to a bias-free `StatefulProjection`. It is not a MetaTF class, so it is tested on its own
-definition (Section 8).
+step. `C` has shape (in, out).
+
+Its MetaTF reference is `quantizeml.layers.StatefulProjection(units, use_bias=False)`, the layer
+`convert_to_stateful` uses for projections: a Keras `Dense` with no bias, applied at every time step. The
+testbench checks `KernelizedLinear` against it (Section 8). Initialization matches it: Glorot uniform,
+`C ~ U(−a, a)` with `a = √(6 / (in + out))` (decided).
 
 Note: "A = 0" in continuous time would mean `Â = exp(0) = 1`, an integrator (running sum). The decided
 meaning is the discrete-time `Â = 0`.
@@ -218,7 +221,12 @@ test score an honest estimate. Test scores of all configurations are still repor
 
 ## 8. Testing (test-first)
 
-Write each test first, see it fail, then implement.
+Write each test first, see it fail, then implement. For `Kernelized` and `KernelizedLinear` this is a testbench
+that runs against both implementations. Expected values come only from MetaTF, never from our own code. The
+testbench must pass against the real MetaTF layers (`Kernelized`, `StatefulProjection`) before any PyTorch code
+exists, and fail against PyTorch until it is built. Before the port, a runnable stand-in with the right
+interface but naive behaviour (zero output, PyTorch default init) must fail on assertions, not just on a
+missing import.
 
 **Reference fixtures from real MetaTF.** A separate, throwaway Python environment (not the project env) with
 `akida_models==1.14.2`, `quantizeml~=1.2.5`, `tensorflow` / `tf_keras ~=2.19`. A script
@@ -231,13 +239,19 @@ committed to the repo. CI and the training env never import TensorFlow. Fixtures
 - Gradients of a scalar loss with respect to the input and to A, B, C, log_dt.
 - Initial A, B, log_dt for a given (in, L, num_coeffs, repeat, speed, speed_range). C is random in MetaTF, so
   only its shape and scale are checked.
+- `StatefulProjection(use_bias=False)` forward outputs and gradients (input and kernel) for several (in, out)
+  settings, on 3-D [B, T, in] and 2-D [B, in] inputs.
 
 Tolerance: float32 (e.g. rtol 1e-4, atol 1e-5).
 
-**PyTorch tests:**
-- `Kernelized` matches every fixture (outputs, gradients, deterministic init).
+**Testbench (runs on MetaTF and on PyTorch):**
+- `Kernelized` matches every fixture (outputs, gradients, deterministic init, C scale).
 - `Kernelized` is causal: changing input after step t leaves outputs ≤ t unchanged.
-- `KernelizedLinear`: output equals `u @ C` per step, only C is trainable, no bias, state size = input width.
+- `Kernelized` has exactly the parameters A, B, C, log_dt.
+- `KernelizedLinear` matches the `StatefulProjection` fixtures (outputs, gradients), is memoryless, has a single
+  parameter (C / Keras `kernel`), and its init is Glorot uniform (bounded by `a`, std ≈ `a/√3`).
+
+**PyTorch-only tests:**
 - `Model`: output shape [B, 15] for k = 1 and k = 5; no bias parameters anywhere.
 - `EMGFK`: k = 1, stride 40 reproduces today's training examples and targets exactly (on a small synthetic
   recording); correct counts for other strides; kernel cap and its warning.
@@ -261,7 +275,7 @@ Add a `pytest` step to `.github/workflows/ci.yml` (CI currently only lints).
 | `.github/workflows/ci.yml` | pytest step |
 | `README.md` | Model description and structure |
 
-## 10. Known risks and later work
+## 10. Known risks, later work and future experiments
 
 - **Tanh vs ReLU.** Both variants are trained (Section 4). Only the `relu` variant is a candidate for Akida:
   MetaTF's Akida models use ReLU, and Tanh support on Akida is unconfirmed.
@@ -270,14 +284,44 @@ Add a `pytest` step to `.github/workflows/ci.yml` (CI currently only lints).
   learning rate.
 - **Front end on the host.** `TangentSpace` (eigendecomposition, matrix log) cannot run on Akida; it stays on
   the host.
-- **Future experiment: stateful input size of 64 raw samples instead of 240.** Note: 64 raw samples hold only
-  one full 60-sample sub-window, so a stateful front end would need to carry sub-windows across chunks.
-- **Future experiment (proposed): downsampling between Kernelized layers.** MetaTF's `Stride(s)` keeps every
-  s-th time step (`x[:, s−1::s]`) after a Kernelized layer, and `convert_to_stateful` folds it into the output
-  projection. In stateful mode on Akida, later layers then run s× less often. A total stride of 2 would match
-  the target rate (one target per 40 raw samples = 2 tangent steps). L must be divisible by the total stride so
-  the last tangent step is kept. Deferred because in kernel mode the sequences are tiny (10–50 tangent steps),
-  so it saves little compute and changes the architecture we're comparing.
-- **Stateful equivalence.** When stateful inference is added, test that streaming in chunks of the stateful
+- **Stateful equivalence (later work).** When stateful inference is added, test that streaming in chunks of the stateful
   input size reproduces kernel-mode outputs. The parameter layout here (A, B, C, log_dt as in MetaTF) is chosen
   so weights can move to a Keras `Kernelized` model and through `convert_to_stateful`.
+
+### 10.1 Future experiments
+
+None of these are in scope for this round. Each one changes a single thing relative to the selected
+configuration from Section 7, and is judged with the same 3-seed, validation-selected rule.
+
+**Streaming and architecture**
+- **Stateful input size of 64 raw samples instead of 240.** 64 raw samples hold only one full 60-sample
+  sub-window, so a stateful front end would need to carry sub-windows across chunks.
+- **Downsampling between Kernelized layers.** MetaTF's `Stride(s)` keeps every s-th time step (`x[:, s−1::s]`)
+  after a Kernelized layer, and `convert_to_stateful` folds it into the output projection. In stateful mode on
+  Akida, later layers then run s× less often. A total stride of 2 would match the target rate (one target per
+  40 raw samples = 2 tangent steps). L must be divisible by the total stride so the last tangent step is kept.
+  Deferred because in kernel mode the sequences are tiny (10–50 tangent steps), so it saves little compute and
+  changes the architecture we're comparing.
+
+**Optimization**
+- **MetaTF's optimizer settings** (Section 6 hyperparameter note): AdamW at lr 5e-3, cosine decay with 10%
+  linear warmup, weight decay 0.05. First follow-up if the model misses the threshold.
+
+**Regularization (adding or swapping)**
+- **Dropout rate.** Sweep 0, 0.1 (current), 0.2 and 0.3 at the current positions.
+- **SpatialDropout1D instead of Dropout.** MetaTF's choice: it drops whole channels across all time steps
+  instead of single values, which suits sequences where neighbouring steps are highly correlated.
+- **BatchNorm after each Kernelized layer.** MetaTF's block pattern (Kernelized → BatchNorm → activation). It
+  also gives the model a learned offset without a bias, and folds into the weights at Akida conversion. It
+  changes the no-bias, no-BatchNorm decision, so it is its own experiment.
+- **Weight decay strength.** Sweep 1e-4 (current), 1e-3, 1e-2 and 0.05 (MetaTF). Separately: exclude `A` and
+  `log_dt` from weight decay, since decaying them pushes the SSM's poles and time steps toward fixed values
+  rather than shrinking weights. Common practice for S4-style layers; MetaTF does not do this.
+- **Input augmentation.** Random per-training-example gain on the EMG (MetaTF's UORED training uses random gain
+  augmentation), and small additive Gaussian noise. Applied before `TangentSpace`, on training examples only.
+- **Early stopping.** The paper uses early stopping with patience 20 instead of a fixed 15 epochs. Try more
+  epochs with patience on validation MAE.
+
+Akida note: Dropout, SpatialDropout1D, weight decay, augmentation and early stopping exist only during training
+and don't affect deployment. BatchNorm folds into the weights. LayerNorm is deliberately not listed because it
+has no folding path to Akida.
