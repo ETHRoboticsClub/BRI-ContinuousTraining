@@ -1,10 +1,10 @@
 """Testbench for Kernelized / KernelizedLinear, run against MetaTF and PyTorch.
 
 Every expected value comes from the MetaTF fixtures in ``tests/fixtures`` (see make_kernelized_fixtures.py) or
-from properties of MetaTF's layers. The float64 reference stored in the Kernelized fixtures is used only to size
-MetaTF's own float32 rounding error (the floors in the forward/gradient tests); the fixture script gates it against
-MetaTF, so it never replaces MetaTF as the expected value. No torch or TensorFlow import happens here; the adapters in
-``kernelized_backends`` do that lazily.
+from properties of MetaTF's layers. The float64 reference stored in the Kernelized fixtures sizes MetaTF's own
+float32 rounding error (the floors in the forward/gradient tests) and is the expected value only in the
+"no less accurate than MetaTF" checks; the fixture script gates it against MetaTF. No torch or TensorFlow import
+happens here; the adapters in ``kernelized_backends`` do that lazily.
 """
 
 from pathlib import Path
@@ -73,6 +73,7 @@ def test_zoh_matches_metatf(backend, name):
 def assert_close(actual, expected, rtol, atol, floor, err_msg=""):
     """|actual - expected| <= max(atol + rtol*|expected|, floor) elementwise."""
     actual, expected = np.asarray(actual, dtype=np.float64), np.asarray(expected, dtype=np.float64)
+    assert actual.shape == expected.shape, f"{err_msg}: shape {actual.shape} != {expected.shape}"
     excess = np.abs(actual - expected) - np.maximum(atol + rtol * np.abs(expected), floor)
     assert excess.max() <= 0, f"{err_msg}: max abs error {np.abs(actual - expected).max():.3e}, floor {floor:.3e}"
 

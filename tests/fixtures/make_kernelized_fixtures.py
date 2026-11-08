@@ -128,7 +128,7 @@ def make_kernelized(name, cfg):
         "y_state": y_state,
         "y_full": y_full,
         **{f"grad_{k}": v for k, v in grads.items()},
-        # stored as float32 to keep the file under 1 MB; the rounding (~6e-8 relative) is far below MetaTF's error
+        # stored as float32 to limit file size; the half-ulp rounding is absorbed by the tests' atol/rtol terms
         "y_exact": y_exact.astype(np.float32),
         **{f"grad_exact_{k}": v.astype(np.float32) for k, v in grad_exact.items()},
         **{k: np.float64(err) for k, (err, _) in errs.items()},
