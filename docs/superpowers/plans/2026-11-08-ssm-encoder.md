@@ -4,7 +4,8 @@
 
 **Goal:** Replace TRR's GRU encoder and linear layers with a faithful PyTorch port of MetaTF's Kernelized SSM
 layers, train them in kernel mode on longer training examples, and sweep k × example stride × activation
-against the paper.
+against the paper. Then try MetaTF's training recipe one change at a time (Section 4), and further
+augmentation, normalization and SSM-regularization changes (Section 5).
 
 **Architecture:** `src/model/kernelized.py` ports `akida_models.custom_layers.Kernelized` (v1.14.2) and adds a
 bias-free `KernelizedLinear`; both are proven against reference fixtures from the real MetaTF layers (`Kernelized`, `StatefulProjection`).
@@ -21,11 +22,11 @@ size term used below).
 ## Global Constraints
 
 - The project environment and CI never import TensorFlow or MetaTF. Only `tests/fixtures/make_kernelized_fixtures.py` does, and it runs in the separate environment.
-- No layer has a bias. No BatchNorm.
+- No layer has a bias. No BatchNorm. (Exception: the opt-in `batchnorm: true` switch of Section 4. Its default is off.)
 - Kernelized parameters keep MetaTF's names and shapes: `A` (N, 2), `B` (in, N), `C` (N, out), `log_dt` (N,). No D term.
 - float32 / complex64, as in MetaTF.
 - Kernel length `L = k × 10` tangent steps; training example = `60 + (L − 1) × 20` raw samples; validation and test always use example stride 40.
-- Unchanged: `TangentSpace` behaviour, preprocessing, subject split (val 19, test 20), HuberLoss, AdamW lr 2e-4 / wd 1e-4, cosine over 15 epochs, batch 256, grad clip 1.0, checkpoint on best val R².
+- Unchanged: `TangentSpace` behaviour, preprocessing, subject split (val 19, test 20), HuberLoss, AdamW lr 2e-4 / wd 1e-4, cosine over 15 epochs, batch 256, grad clip 1.0, checkpoint on best val R². Section 4's switches default to exactly these settings, so with default `params.yaml` the model and training are unchanged.
 - `ruff check .` and `ruff format --check .` pass (line length 120).
 - Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
@@ -36,6 +37,10 @@ size term used below).
 3. k large enough to exceed the shortest recording: L is capped at `L_max` and a warning is emitted (Task 5, `test_kernel_length_caps_and_warns`).
 4. A training stride other than 40: validation and test datasets still use stride 40 (Task 7, `test_eval_sets_use_stride_40`).
 5. An activation name other than `tanh` / `relu`: `ValueError`, not a silent default (Task 4, `test_unknown_activation_raises`).
+6. Spatial dropout on a 2-D `[B, C]` input (the head's hidden layer with `readout: last`): it must drop single features, never whole examples. `nn.Dropout1d` treats a 2-D input as one unbatched `(C, L)` sequence and would zero entire batch rows (Task 10, `test_spatial_dropout_2d_never_drops_whole_examples`).
+7. `warmup_cosine` at step 0 and at the last step: the LR is the 1e-5 floor, never 0 (Task 10, `test_warmup_cosine_matches_metatf`).
+8. Unknown values of `lr_schedule`, `dropout_type` or `readout`: `ValueError` (Task 10, `test_unknown_switch_values_raise`).
+9. Augmentation reaching validation or test examples, or default `normalization` not reproducing today's z-scored examples (Task 13, Step 1).
 
 ---
 
@@ -561,3 +566,332 @@ git commit -m "feat: k x stride sweep via DVC experiments and validation-based s
 - [ ] **Step 2: Run the tanh grid.** `sky exec hri-gpu sky/train.yaml --env SWEEP=tanh`, then `rsync hri-gpu:sky_workdir/sweep_tanh.csv .`, then `python scripts/summarize_sweep.py sweep_tanh.csv`.
 - [ ] **Step 3: Report to the user:** the table, the selected configuration and its verdict against 16.71° / 17.21°.
 - [ ] **Step 4: Repeat Steps 1–3 for `relu`** once the user confirms.
+- [ ] **Step 5: Ask the user which base configuration(s) Section 4 runs on** (k, example stride, activation). The user decides this after seeing both tables, not by a fixed rule.
+
+---
+
+## Section 4: MetaTF training recipe, one change at a time (Tasks 10–12)
+
+**Why.** MetaTF's Kernelized examples (`akida_models.tenn_recurrent.uored_train`, `sc12_train`, v1.14.2) train
+with far stronger regularization and a higher LR than our SSM (spec §6 hyperparameter note). This section
+pulls seven of spec §10.1's future experiments into scope (decision: user, 2026-11-09). Each **changes a
+single thing** relative to the baseline, on a base configuration that the user picks after Task 9. Each one
+uses 3 seeds and is compared with a baseline rerun of the same base configuration.
+
+**The seven changes** (baseline in brackets):
+
+| # | Change | `-S src/params.yaml:train.…` | MetaTF source |
+|---|---|---|---|
+| 1 | Weight decay 0.05 [1e-4] | `weight_decay=0.05` | UORED and SC12 |
+| 2 | Linear warmup over 10% of steps, then per-step cosine decay with a 1e-5 floor [per-epoch cosine to 0, no warmup] | `lr_schedule=warmup_cosine` | `CosineDecayWithLinearWarmup`, UORED |
+| 3 | No gradient clipping [norm 1.0] | `grad_clip=null` | Neither example clips |
+| 4 | `SpatialDropout1D(0.1)` after each of the 4 SSM blocks [plain `Dropout(0.1)` in 2 places] | `dropout_type=spatial` | UORED: after each of 4 blocks |
+| 5 | BatchNorm after every SSM block [none] | `batchnorm=true` | `kernelized_block(add_batchnorm=True)` |
+| 6 | Global average pooling over all tangent steps [last tangent step] | `readout=mean` | `GlobalAveragePooling1D` after the head |
+| 7 | Peak LR 5e-3 [2e-4] | `lr=0.005` | UORED |
+
+Change 7 is the user's addition. It runs alone, like the others, so it uses the baseline schedule with no
+warmup (my reading of "one at a time"). Change 2 warms up to the baseline peak of 2e-4. Batch size stays 256.
+
+**Mapping MetaTF's "SSM block" onto our model.** UORED has 4 blocks, each Kernelized → (Stride) →
+BatchNorm → ReLU → SpatialDropout1D(0.1), followed by an output layer with neither BatchNorm nor activation.
+Our 4 blocks are the four layers followed by an activation: `proj`, `ssm1`, `ssm2` and the head's hidden
+layer (`head[0]`). The output layer `KernelizedLinear(64, 15)` gets neither BatchNorm nor dropout, as in UORED.
+Within a block the order is layer → BatchNorm → activation → spatial dropout.
+
+**Known risk of change 6.** UORED classifies a constant label per segment. Our target is the angle at the last
+raw sample of the training example. Averaging per-step predictions predicts a smoothed, lagged angle: the mean
+over 1.2 s (k = 1) or 5.2 s (k = 5). Expect it to hurt more at k = 5. A mean readout also has no direct
+stateful equivalent: streaming would need a running average over the kernel window. It is tested anyway because
+the user asked for it, and the result answers the question.
+
+### Task 10: Opt-in switches for the seven changes
+
+**Files:**
+- Modify: `src/model/ssm.py`, `src/model/model.py`, `src/trainer.py`, `scripts/train.py`, `src/params.yaml`, `README.md`
+- Modify: `tests/test_model.py`, `tests/test_trainer.py`, `tests/test_train.py`
+
+**Interfaces:**
+- `src/params.yaml` `train:` adds `lr_schedule: cosine`, `dropout_type: standard`, `batchnorm: false` and
+  `readout: last`. `lr`, `weight_decay` and `grad_clip` already exist; `grad_clip: null` means no clipping
+  (`train_epoch` already skips clipping when it is `None`).
+- `src/model/ssm.py`:
+  - `SpatialDropout(p)`, channels last. On `[B, L, C]` it zeroes whole channels across all L steps
+    (`nn.Dropout1d` on the transposed `[B, C, L]`). On `[B, C]` it behaves as `nn.Dropout(p)`: with no time
+    axis, one value per channel is the whole channel.
+  - `ChannelBatchNorm(C)`, channels last: `nn.BatchNorm1d(C, momentum=0.1, eps=1e-5)` on `[B, C]`, or on the
+    transposed `[B, C, L]` for `[B, L, C]`. Torch's momentum 0.1 equals Keras's 0.9.
+  - `SSMEncoder(..., dropout_type="standard", batchnorm=False, readout="last")`.
+    `"standard"` keeps today's two `Dropout` positions. `"spatial"` removes them and puts a `SpatialDropout(0.1)`
+    after each block's activation. `readout="mean"` returns the sequence `[B, L, 128]` instead of the last step;
+    in standard mode the final `Dropout` then applies to the sequence.
+- `src/model/model.py`: `Model(channels, targets, length, activation="tanh", hidden=64, dropout_type="standard",
+  batchnorm=False, readout="last")`. The head applies the same block pattern to `head[0]`. With
+  `readout="mean"` the head runs on every tangent step (`KernelizedLinear` accepts `[B, L, C]`) and the output
+  is the mean over the L steps of `[B, L, targets]`. With every switch at its default, the layout and the
+  indices `head[0]` and `head[2]` are unchanged, so Task 4's tests pass as they are. Unknown `dropout_type` or
+  `readout` values raise `ValueError`.
+- `src/trainer.py`:
+  - `make_scheduler(optimizer, name, epochs, steps_per_epoch) -> (scheduler, per_batch: bool)`.
+    `"cosine"` gives `CosineAnnealingLR(optimizer, epochs)` with `per_batch=False`, as today.
+    `"warmup_cosine"` gives `LambdaLR` with `per_batch=True`, mirroring MetaTF's `CosineDecayWithLinearWarmup`
+    with total = epochs × steps_per_epoch, warmup = 0.1 × total and floor 1e-5:
+    `lr(s) = max(peak · s / warmup if s < warmup else peak · ½(1 + cos(π (s − warmup) / (total − warmup))), 1e-5)`.
+    Other names raise `ValueError`.
+  - `train_epoch(..., grad_clip=None, scheduler=None)` steps `scheduler` after every optimizer step when given.
+    `fit(..., grad_clip=None, step_per_batch=False)` passes the scheduler to `train_epoch` when
+    `step_per_batch`, and otherwise steps it once per epoch, as today.
+- `scripts/train.py`: builds the model from the four new keys, builds the scheduler with `make_scheduler(...,
+  len(train_loader))`, and passes `step_per_batch`. AdamW stays applied to all parameters, BatchNorm's
+  included, as in MetaTF.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_spatial_dropout_drops_whole_channels():
+    x = torch.ones(64, 50, 32)
+    y = SpatialDropout(0.5).train()(x)
+    per_channel = y.permute(0, 2, 1).reshape(-1, 50)  # each row: one channel of one example over time
+    assert all(row.unique().numel() == 1 for row in per_channel)  # all zero or all scaled
+
+
+def test_spatial_dropout_2d_never_drops_whole_examples():
+    y = SpatialDropout(0.5).train()(torch.ones(256, 64))
+    assert (y != 0).any(1).all()  # no example (row) fully zeroed: nn.Dropout1d on 2-D would do that
+
+
+@pytest.mark.parametrize("readout", ["last", "mean"])
+def test_spatial_dropout_after_each_block(readout):
+    m = Model(8, 15, 10, dropout_type="spatial", readout=readout)
+    assert sum(isinstance(x, SpatialDropout) for x in m.modules()) == 4
+    assert not any(type(x) is nn.Dropout for x in m.modules())
+
+
+@pytest.mark.parametrize("readout", ["last", "mean"])
+def test_batchnorm_after_each_block(readout):
+    m = Model(8, 15, 10, batchnorm=True, readout=readout)
+    assert sum(isinstance(x, ChannelBatchNorm) for x in m.modules()) == 4
+    biases = [n for n, _ in m.named_parameters() if "bias" in n]
+    assert biases and all(".bn" in n or "norm" in n.lower() for n in biases)  # only BatchNorm has a bias
+    assert m(torch.randn(4, 8, 240)).shape == (4, 15)
+
+
+def test_mean_readout_averages_head_over_steps():
+    m = Model(8, 15, 10, readout="mean").eval()
+    x = torch.randn(2, 8, 240)
+    seq = m.encoder(m.tangent_space(x))
+    assert seq.shape == (2, 10, 128)
+    torch.testing.assert_close(m(x), m.head(seq).mean(1))
+
+
+def test_unknown_switch_values_raise():
+    for kwargs in ({"dropout_type": "alpha"}, {"readout": "max"}):
+        with pytest.raises(ValueError):
+            Model(8, 15, 10, **kwargs)
+    with pytest.raises(ValueError):
+        make_scheduler(torch.optim.AdamW([nn.Parameter(torch.zeros(1))]), "step", 2, 10)
+
+
+def test_warmup_cosine_matches_metatf():
+    opt = torch.optim.AdamW([nn.Parameter(torch.zeros(1))], lr=1e-3)
+    sched, per_batch = make_scheduler(opt, "warmup_cosine", epochs=2, steps_per_epoch=10)  # total 20, warmup 2
+    lrs = []
+    for _ in range(20):
+        lrs.append(opt.param_groups[0]["lr"])
+        opt.step()
+        sched.step()
+    assert per_batch
+    assert lrs[0] == pytest.approx(1e-5)   # MetaTF: max(0, floor)
+    assert lrs[1] == pytest.approx(5e-4)   # halfway through warmup
+    assert lrs[2] == pytest.approx(1e-3)   # peak at the end of warmup
+    assert lrs[19] == pytest.approx(1e-5)  # cosine tail clipped to the floor
+    assert all(a >= b for a, b in zip(lrs[2:], lrs[3:]))
+
+
+def test_cosine_schedule_unchanged():
+    opt = torch.optim.AdamW([nn.Parameter(torch.zeros(1))], lr=1e-3)
+    sched, per_batch = make_scheduler(opt, "cosine", epochs=15, steps_per_epoch=10)
+    assert isinstance(sched, torch.optim.lr_scheduler.CosineAnnealingLR) and not per_batch
+```
+
+Also add to `tests/test_train.py`: `run` completes on the synthetic data with each of the seven changes
+applied alone (`params` overridden as in the table, `grad_clip: None` for change 3). Name the BatchNorm
+submodules so the bias check above holds (e.g. `bn`). If a different name reads better, adjust the assertion
+in the same commit.
+
+- [ ] **Step 2: Run them and confirm they fail**
+
+Run: `pytest tests/test_model.py tests/test_trainer.py tests/test_train.py -v` → FAIL (`ImportError` for
+`SpatialDropout`, `ChannelBatchNorm`, `make_scheduler`).
+
+- [ ] **Step 3: Implement**, then update `README.md`: the four new `params.yaml` keys and that `grad_clip: null`
+  disables clipping.
+
+- [ ] **Step 4: Run and confirm everything passes**
+
+Run: `pytest -v && ruff check . && ruff format --check .` → all PASS, including Task 4's unchanged tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/ scripts/train.py README.md tests/
+git commit -m "feat: opt-in MetaTF recipe switches (schedule, dropout type, BatchNorm, readout)"
+```
+
+---
+
+### Task 11: Recipe sweep tooling
+
+**Files:**
+- Create: `scripts/sweep_recipe.sh`
+- Modify: `scripts/summarize_sweep.py`, `tests/test_summarize_sweep.py`
+- Modify: `sky/train.yaml` (env `RECIPE: ""`, e.g. `RECIPE="tanh 5 40"`; if set, run `bash scripts/sweep_recipe.sh $RECIPE`)
+- Modify: `README.md`
+
+**Interfaces:**
+- `scripts/sweep_recipe.sh ACTIVATION K STRIDE`: the same `dvc pull` / `repro build_dataset` / `push` preamble
+  as `sweep.sh`, then 8 `dvc exp run`s, each with `-S train.activation=$1 -S train.k=$2
+  -S train.example_stride=$3`: a **baseline rerun** with nothing else changed, then one per change in the
+  table. It writes `dvc exp show --csv > recipe_$1_k$2_s$3.csv` and honours `PUSH_EXPERIMENTS` like `sweep.sh`.
+  The baseline rerun is my call. Task 10 changes `src/model`, so Task 9's baseline came from different code.
+  Rerunning it on the same commit keeps the comparison like for like, at a cost of 3 extra runs.
+- `scripts/summarize_sweep.py`:
+  - `RECIPE_DEFAULTS = {"train.lr": 0.0002, "train.weight_decay": 0.0001, "train.lr_schedule": "cosine",
+    "train.grad_clip": 1.0, "train.dropout_type": "standard", "train.batchnorm": False, "train.readout": "last"}`.
+  - `change_label(row) -> str`: `"baseline"` if every recipe key equals its default, the single differing key
+    (e.g. `"weight_decay=0.05"`) if exactly one differs, otherwise `ValueError`. Values are compared after
+    parsing, so `0.05`, `"0.05"`, `None` / `""` / `"null"` and `"False"` / `"false"` compare correctly.
+  - `read_rows(path, columns=COLUMNS)`: recipe mode also reads the recipe keys and `val.mae.std`.
+  - CLI `python scripts/summarize_sweep.py recipe_tanh_k5_s40.csv` (recipe mode from the file name) keeps only
+    rows with that activation, k and stride, one row per change label. It prints, sorted by val MAE: the label,
+    val MAE mean ± std, Δ val versus the baseline, test MAE and Δ test. Then it prints the change with the
+    lowest val MAE and its test-MAE verdict. Test is never used to rank.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_change_label():
+    base = {**RECIPE_DEFAULTS}
+    assert change_label(base) == "baseline"
+    assert change_label({**base, "train.weight_decay": "0.05"}) == "weight_decay=0.05"
+    assert change_label({**base, "train.grad_clip": ""}) == "grad_clip=None"
+    with pytest.raises(ValueError):
+        change_label({**base, "train.lr": "0.005", "train.batchnorm": "true"})
+```
+
+Plus a recipe-mode CLI test on a small hand-written CSV (8 rows plus one row from another k, which must be
+ignored). It checks the Δ columns and that a change with better test MAE but worse val MAE is not selected.
+
+- [ ] **Step 2: Run them and confirm they fail**, then **implement**, then **run them and confirm they pass** (`pytest -v`, ruff clean).
+- [ ] **Step 3: Check `grad_clip=null` end to end.** Before any GPU run, run `dvc exp run -S src/params.yaml:train.grad_clip=null`
+  locally with `epochs: 1`, `seeds: [0]` (overridden with `-S` too). Confirm `dvc exp show` lists `grad_clip`
+  as null and that no clipping happened (no error from `clip_grad_norm_(…, None)`). Then remove the
+  experiment (`dvc exp remove`).
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/sweep_recipe.sh scripts/summarize_sweep.py tests/test_summarize_sweep.py sky/train.yaml README.md
+git commit -m "feat: one-at-a-time MetaTF recipe sweep and summary"
+```
+
+---
+
+### Task 12: Run the recipe sweep (needs the user's go-ahead: GPU cost)
+
+- [ ] **Step 1: Get the base configuration(s)** from Task 9 Step 5.
+- [ ] **Step 2: Ask the user to confirm 24 GPU runs per base configuration** (8 experiments × 3 seeds) on
+  SkyPilot. Do not launch without a yes.
+- [ ] **Step 3: Run.** `sky exec hri-gpu sky/train.yaml --env RECIPE="<activation> <k> <stride>"`, then
+  `rsync hri-gpu:sky_workdir/recipe_<activation>_k<k>_s<stride>.csv .`, then
+  `python scripts/summarize_sweep.py recipe_<activation>_k<k>_s<stride>.csv`.
+- [ ] **Step 4: Report to the user:** the table, which changes beat the baseline on val MAE by more than the
+  baseline's seed std, and the val-selected change's test MAE and verdict against 16.71° / 17.21°. Whether to
+  combine the winning changes is the user's call. A combination is not part of this plan.
+- [ ] **Step 5: Ask the user for Section 5's base configuration.** It may include changes from this section.
+
+---
+
+## Section 5: Extra experiments (Task 13)
+
+### Task 13: Augmentation, normalization and SSM regularization, one change at a time
+
+**Implemented by `docs/superpowers/plans/2026-11-09-extra-experiments.md`** (Tasks 13.1–13.9). That plan replaces the
+Files and Steps below. The change table and "My calls" stand.
+
+**Why.** These are three more places the model could be under-regularized or mismatched across subjects: the
+inputs (augmentation), the scale of the inputs (normalization), and the SSM's own dynamics. As in Section 4,
+each experiment **changes a single thing** relative to a base configuration that the user picks after Task 12.
+Each uses 3 seeds and is compared with a baseline rerun of that base.
+
+**The changes** (baseline in brackets):
+
+| # | Change | Switch (`train.…`) |
+|---|---|---|
+| **Augmentation** (training examples only; validation and test are never augmented) | | |
+| A1 | Per-channel random gain: each of the 8 channels × `exp(N(0, 0.2))`, drawn per training example [none] | `aug_gain=0.2` |
+| A2 | Rotation of the electrode ring by a whole electrode: circular shift of the 8 channels by r ∈ {−1, 0, +1}, uniform, per training example [none] | `aug_rotate=1` |
+| A3 | Fractional rotation (spatial shift between electrodes): shift by u ~ U(−0.5, 0.5) electrode, linear interpolation between ring neighbours, per training example [none] | `aug_shift=0.5` |
+| **Normalization** | | |
+| N1 | Per-channel z-score with statistics pooled over each set: the 18 training subjects together, the validation subject and the test subject [z-score per subject] | `normalization=set` |
+| **SSM regularization** | | |
+| S1 | Downsampling: keep every 2nd tangent step after `ssm1` (`x[:, s−1::s]`, MetaTF's `Stride`) [none] | `downsample=2` |
+| S2 | Same with s = 5 | `downsample=5` |
+| S3 | Smaller Δt: Kernelized `speed` 1 instead of 4 (initial Δt ÷ 4) | `ssm_speed=1` |
+| S4 | Smaller Δt: `speed` 0.25 (initial Δt ÷ 16) | `ssm_speed=0.25` |
+| S5 | Lower learning rate for the SSM dynamics: `A` and `log_dt` at 0.1 × the LR (own AdamW param group) [same LR] | `ssm_lr_scale=0.1` |
+| S6 | No weight decay on `A` (own param group, `weight_decay=0`) [decayed like every parameter] | `ssm_decay_A=false` |
+
+That is 10 changes plus the baseline: 11 experiments × 3 seeds = **33 runs** per base configuration.
+
+**My calls, which the user can change before Task 13 starts:**
+- **Augmentation strengths:** σ = 0.2 for A1 (about ±20%), ±1 electrode for A2 (±45°) and ±0.5 electrode for A3.
+  MetaTF's UORED gain is one shared gain of N(1, 0.7) and has no per-channel version.
+- **Rotation is a circular channel shift.** The MindRove armband (paper §II) has 8 electrodes evenly spaced
+  around the forearm. The builder must confirm that `EMG 1`…`EMG 8` follow the ring in order before running
+  A2/A3. If they don't, permute the channels into ring order inside the augmentation, or report and skip. A
+  shift does not model the single reference electrode moving with the band. The paper notes that the
+  reference strongly affects every channel.
+- **N1 only changes training.** Validation and test are each a single subject, so per-set statistics equal
+  today's per-subject statistics there. N1 compares per-subject z-scoring against pooling across the 18 training
+  subjects. Like today's z-score, it uses whole-recording statistics, including the test recording's.
+- **Downsampling factors** 2 and 5 divide both L = 10 and L = 50, so the last tangent step is kept. `ssm2` is
+  built with length L / s, because MetaTF initializes `log_dt` from the input length.
+- **"Smaller Δt" means a smaller initial Δt** through `speed`, which gives longer SSM memory. Δt stays trainable.
+- **"Lower learning rate" means the SSM dynamics only** (`A`, `log_dt`), as in S4-style training. A lower
+  global LR is just `lr`. Add it as a separate change if wanted.
+- **S6 excludes `A` only**, as asked. Spec §10.1 also suggests excluding `log_dt`.
+
+**Files:**
+- Modify: `scripts/build_dataset.py` (saves the EMG *before* the z-score; this changes the DVC `build_dataset` output, so rebuild and push once)
+- Modify: `src/dataset.py` (`EMGFK(..., normalization="subject", augment=None)`: z-scores at load time, per recording or pooled over the dataset's recordings; `augment` applies to training examples in `__getitem__`)
+- Create: `src/augment.py` (`channel_gain(x, sigma)`, `rotate(x, r)`, `shift(x, u)` on `[8, T]`, using torch's RNG so `torch.manual_seed(seed)` makes them reproducible)
+- Modify: `src/model/ssm.py`, `src/model/model.py` (`downsample`, `ssm_speed`)
+- Modify: `scripts/train.py` (the param groups for S5 and S6; augmentation and normalization switches passed to the datasets: training gets `augment`, validation and test never do)
+- Modify: `src/params.yaml` (the new keys, defaults = baseline), `README.md`
+- Create: `scripts/sweep_extra.sh`; modify `scripts/summarize_sweep.py`, `sky/train.yaml` (env `EXTRA`)
+- Tests: `tests/test_augment.py` (new), `tests/test_dataset.py`, `tests/test_model.py`, `tests/test_train.py`, `tests/test_summarize_sweep.py`
+
+- [ ] **Step 1: Write the failing tests.** At minimum:
+  - **Defaults change nothing:** `normalization="subject"` on the new un-normalized recordings reproduces
+    today's z-scored training examples (float32 tolerance), and all earlier tests pass unchanged.
+  - **N1:** pooled statistics are taken over the concatenated recordings of the dataset's own subjects. For a
+    single-subject set they equal the per-subject statistics.
+  - **Augmentation:** `rotate(x, 1)` equals `x.roll(1, 0)`. `shift(x, 0)` is `x`, and `shift(x, 1)` equals
+    `rotate(x, 1)`. `channel_gain` with σ = 0 is `x`. Each channel gets its own gain. Validation and test
+    datasets return identical tensors on repeated access; the training set with augmentation does not.
+  - **S1/S2:** a stride that does not divide L raises `ValueError`. The output shape is unchanged. `ssm2`'s
+    `log_dt` is initialized from L / s.
+  - **S3/S4:** `log_dt` init shifts by `log(speed / 4)` relative to the default.
+  - **S5/S6:** the optimizer has the expected param groups. `A` and `log_dt` get `lr × 0.1` under S5, and `A`
+    gets `weight_decay = 0` under S6. Every parameter is in exactly one group.
+- [ ] **Step 2: Run them and confirm they fail**, then **implement**, then **run them and confirm they pass**
+  (`pytest -v && ruff check . && ruff format --check .`).
+- [ ] **Step 3: Sweep tooling.** `scripts/sweep_extra.sh ACTIVATION K STRIDE` mirrors `sweep_recipe.sh`. Extra
+  base overrides (e.g. Section 4 winners) come from env `BASE_SETS` (a string of `-S` arguments). Each
+  experiment is named with `dvc exp run -n extra-<label>` (`extra-baseline`, `extra-aug_gain`, …). The
+  script writes `extra_$1_k$2_s$3.csv`. `summarize_sweep.py` labels rows by that experiment name, not by
+  hard-coded defaults, so any base works. It prints the same Δ-versus-baseline table as Task 11.
+  Commit: `feat: augmentation, set normalization and SSM regularization switches, extra sweep`.
+- [ ] **Step 4: Ask the user to confirm 33 GPU runs per base configuration.** Do not launch without a yes.
+- [ ] **Step 5: Run and report** as in Task 12 Steps 3–4: the table, which changes beat the baseline on val
+  MAE by more than its seed std, and the val-selected change's test MAE and verdict.
