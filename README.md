@@ -50,7 +50,7 @@ target. Train examples are `example_stride` raw samples apart; validation and te
 
 | `train` key | Meaning |
 |---|---|
-| `k` | Kernel-training example = `k` stateful inputs (240 samples each), capped by the shortest recording |
+| `k` | Kernel-training example = `k` stateful inputs (240 samples each), capped by the shortest recording (over all subjects) |
 | `example_stride` | Raw samples between consecutive training examples |
 | `activation` | `tanh` or `relu` |
 | `seeds` | One model is trained per seed; metrics are reported as mean and sample std over seeds |
@@ -59,7 +59,7 @@ target. Train examples are `example_stride` raw samples apart; validation and te
 
 ```bash
 dvc repro                  # build the dataset (downloads ~2 GB on first run) and train
-dvc metrics show           # val and test MSE / R²
+dvc metrics show           # val and test MAE (degrees), NMSE, MSE, R²: mean/std over seeds
 dvc plots show             # training curves
 dvc push                   # share the built dataset and output/
 ```
@@ -86,10 +86,10 @@ The summary lists val and test MAE of every configuration and selects the one wi
 
 Raw recordings are downloaded from Zenodo and not versioned. DVC versions the built dataset
 (`data/processed/emg_fk`) and the training output (`output/`) through `dvc.lock`, so every commit
-points to the exact windows and model it trained.
+points to the exact recordings and model it trained.
 
 `output/` holds `seed_<n>/best_model.pt` per seed, `history.csv` (all seeds, with a `seed` column) and
 `metrics.json` (`kernel_length`, `example_length`, `val`/`test` mean and std of mse, r2, nmse, mae in degrees, and
-per-seed values).
+per-seed values; std is 0 when only one seed is run).
 
-Splits are by subject (`train.val_subjects`, `train.test_subjects`), never random windows, because windows overlap.
+Splits are by subject (`train.val_subjects`, `train.test_subjects`), never random training examples, because examples overlap.
