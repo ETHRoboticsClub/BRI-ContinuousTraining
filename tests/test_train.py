@@ -58,3 +58,16 @@ def test_set_normalization_changes_training_only(data_dir):
     for loader in (2, 3):  # val, test: one subject each, so pooled == per-subject
         assert torch.equal(sets["subject"][loader].dataset[0][0], sets["set"][loader].dataset[0][0])
     assert not torch.equal(sets["subject"][0][0][0], sets["set"][0][0][0])
+
+
+def test_only_training_examples_are_augmented(data_dir):
+    train_set, _, val_loader, test_loader = load_data({**PARAMS, "aug_gain": 0.2}, data_dir, 240)
+    assert not torch.equal(train_set[0][0], train_set[0][0])
+    for ds in (val_loader.dataset, test_loader.dataset):
+        assert ds.augment is None and torch.equal(ds[0][0], ds[0][0])
+
+
+@pytest.mark.parametrize("change", [{"aug_gain": 0.2}])
+def test_run_with_each_extra_change(tmp_path, data_dir, change):
+    m = run({**PARAMS, "seeds": [0], **change}, data_dir, tmp_path / "out")
+    assert np.isfinite(m["val"]["mae"]["mean"])

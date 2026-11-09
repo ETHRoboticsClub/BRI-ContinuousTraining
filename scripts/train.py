@@ -7,6 +7,7 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader
 
+from src.augment import Augment
 from src.dataset import EMGFK, kernel_length, recording_path, shortest_recording
 from src.model.model import Model
 from src.model.tangent_space import raw_length
@@ -19,12 +20,15 @@ METRICS = ("mse", "r2", "nmse", "mae")
 
 
 def load_data(params, data_dir, length):
-    """Cross-subject split: val/test subjects are held out, every other recorded subject is used for training."""
+    """Cross-subject split: val/test subjects are held out, every other recorded subject is used for training.
+
+    Only the training set is augmented.
+    """
     held_out = params["val_subjects"] + params["test_subjects"]
     recorded = [s for s in range(1, 100) if recording_path(data_dir, s).exists()]
     train_subjects = [s for s in recorded if s not in held_out]
     norm = params["normalization"]
-    train_set = EMGFK(data_dir, train_subjects, length, params["example_stride"], norm)
+    train_set = EMGFK(data_dir, train_subjects, length, params["example_stride"], norm, Augment.from_params(params))
     train_loader = DataLoader(train_set, params["batch_size"], shuffle=True, drop_last=True)
     val_set = EMGFK(data_dir, params["val_subjects"], length, EVAL_STRIDE, norm)
     test_set = EMGFK(data_dir, params["test_subjects"], length, EVAL_STRIDE, norm)
@@ -51,6 +55,8 @@ def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
     history, seeds = [], {}
     for seed in params["seeds"]:
         torch.manual_seed(seed)
+        if train_set.augment is not None:
+            train_set.augment.manual_seed(seed)
         seed_dir = out_dir / f"seed_{seed}"
         seed_dir.mkdir(parents=True, exist_ok=True)
 

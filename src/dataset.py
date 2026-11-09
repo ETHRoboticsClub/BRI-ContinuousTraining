@@ -52,17 +52,20 @@ class EMGFK(Dataset):
     examples of a recording end `stride` raw samples apart, the first at e = length - 1.
 
     The EMG is z-scored per channel at load time: per recording ("subject"), with statistics pooled over this
-    dataset's recordings ("set"), or not at all ("none").
+    dataset's recordings ("set"), or not at all ("none"). `augment`, if given, is applied to every example on access.
     """
 
     channels = 8
     targets = 15
 
-    def __init__(self, data_dir, subjects, length: int, stride: int, normalization: str = "subject") -> None:
+    def __init__(
+        self, data_dir, subjects, length: int, stride: int, normalization: str = "subject", augment=None
+    ) -> None:
         if normalization not in NORMALIZATIONS:
             raise ValueError(f"unknown normalization {normalization!r}, expected one of {NORMALIZATIONS}")
         self.length = length
         self.stride = stride
+        self.augment = augment
         self.emg, self.angles = [], []
         self.index = []  # (position in self.emg, end sample)
         for pos, s in enumerate(subjects):
@@ -82,5 +85,7 @@ class EMGFK(Dataset):
 
     def __getitem__(self, i) -> tuple[torch.Tensor, torch.Tensor]:
         pos, e = self.index[i]
-        x = self.emg[pos][:, e - self.length + 1 : e + 1]
-        return torch.from_numpy(np.ascontiguousarray(x)), torch.from_numpy(self.angles[pos][:, e].copy())
+        x = torch.from_numpy(np.ascontiguousarray(self.emg[pos][:, e - self.length + 1 : e + 1]))
+        if self.augment is not None:
+            x = self.augment(x)
+        return x, torch.from_numpy(self.angles[pos][:, e].copy())

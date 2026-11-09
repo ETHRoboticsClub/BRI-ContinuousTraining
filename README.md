@@ -28,6 +28,7 @@ scripts/
 src/
   params.yaml          preprocessing and training parameters
   preprocess.py        Preprocess: causal notch + bandpass filter
+  augment.py           Augment: random per-example channel gain, electrode-ring rotation and shift (training only)
   dataset.py           EMGFK: continuous recordings sliced into training examples (torch Dataset)
   model/
     tangent_space.py   TangentSpace: sub-window covariances in the Riemannian tangent space
@@ -55,6 +56,7 @@ target. Train examples are `example_stride` raw samples apart; validation and te
 | `example_stride` | Raw samples between consecutive training examples |
 | `activation` | `tanh` or `relu` |
 | `normalization` | EMG z-score per channel: `subject` (each recording on its own statistics), `set` (statistics pooled over the recordings of each split, so only training changes: validation and test are one subject each) or `none` |
+| `aug_gain` | Training examples only: each EMG channel is scaled by `exp(N(0, aug_gain))`, drawn per example; 0 = off |
 | `seeds` | One model is trained per seed; metrics are reported as mean and sample std over seeds |
 
 ## Run

@@ -16,6 +16,7 @@ stages:
     deps:
       - data/processed/emg_fk
       - scripts/train.py
+      - src/augment.py
       - src/dataset.py
       - src/model
       - src/trainer.py

@@ -11,6 +11,9 @@ train:
   example_stride: 40      # raw samples between training examples
   activation: tanh        # tanh or relu
   normalization: subject  # EMG z-score: none, subject or set (pooled over each set's subjects)
+  aug_gain: 0.0           # training examples only: std of the log per-channel gain; 0 = off
+  aug_rotate: 0           # training examples only: max rotation around the electrode ring, whole electrodes; 0 = off
+  aug_shift: 0.0          # training examples only: max fractional shift around the ring, electrodes; 0 = off
   batch_size: 256
   lr: 0.0002
   weight_decay: 0.0001
