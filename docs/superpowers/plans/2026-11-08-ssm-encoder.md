@@ -835,7 +835,7 @@ Each uses 3 seeds and is compared with a baseline rerun of that base.
 | N1 | Per-channel z-score with statistics pooled over each set: the 18 training subjects together, the validation subject and the test subject [z-score per subject] | `normalization=set` |
 | **SSM regularization** | | |
 | S1 | Downsampling: keep every 2nd tangent step after `ssm1` (`x[:, s−1::s]`, MetaTF's `Stride`) [none] | `downsample=2` |
-| S2 | Same with s = 5 | `downsample=5` |
+| S2 | Same with s = 4 (user, 2026-11-09: powers of 2 only; needs L divisible by 4, i.e. k even) | `downsample=4` |
 | S3 | Smaller Δt: Kernelized `speed` 1 instead of 4 (initial Δt ÷ 4) | `ssm_speed=1` |
 | S4 | Smaller Δt: `speed` 0.25 (initial Δt ÷ 16) | `ssm_speed=0.25` |
 | S5 | Lower learning rate for the SSM dynamics: `A` and `log_dt` at 0.1 × the LR (own AdamW param group) [same LR] | `ssm_lr_scale=0.1` |

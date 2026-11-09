@@ -60,7 +60,7 @@ target. Train examples are `example_stride` raw samples apart; validation and te
 | `aug_gain` | Training examples only: each EMG channel is scaled by `exp(N(0, aug_gain))`, drawn per example; 0 = off |
 | `aug_rotate` | Training examples only: the 8 channels are rotated around the electrode ring by r ~ U{-aug_rotate, ..., aug_rotate} electrodes, drawn per example; 0 = off |
 | `aug_shift` | Training examples only: fractional rotation by u ~ U(-aug_shift, aug_shift) electrodes, linearly interpolating between ring neighbours, drawn per example; 0 = off |
-| `downsample` | Keep every s-th tangent step after the first SSM layer (MetaTF's `Stride`); the second SSM layer sees L / s steps. s must divide L and leave at least 2 steps |
+| `downsample` | Keep every s-th tangent step after the first SSM layer (MetaTF's `Stride`); the second SSM layer sees L / s steps. s must be a power of 2, divide L and leave at least 2 steps (so 4 needs k even: L = 10k) |
 | `ssm_speed` | `speed` of both Kernelized layers (MetaTF default 4): their initial dt is proportional to it; dt stays trainable |
 | `ssm_lr_scale` | The SSM dynamics (`A`, `log_dt` of both Kernelized layers) train at `lr` x this (own AdamW parameter group) |
 | `ssm_decay_A` | `false`: no weight decay on `A` |
@@ -98,7 +98,7 @@ The summary lists val and test MAE of every configuration and selects the one wi
 
 `scripts/sweep_extra.sh tanh|relu K STRIDE` runs 11 experiments on one base configuration: a baseline rerun and
 one experiment per change (`aug_gain=0.2`, `aug_rotate=1`, `aug_shift=0.5`, `normalization=set`, `downsample=2`
-and `5`, `ssm_speed=1` and `0.25`, `ssm_lr_scale=0.1`, `ssm_decay_A=false`). Each is a DVC experiment named
+and `4`, `ssm_speed=1` and `0.25`, `ssm_lr_scale=0.1`, `ssm_decay_A=false`). Each is a DVC experiment named
 `x-<activation>-k<K>-s<STRIDE>-<change>`. `BASE_SETS="key=value ..."` adds base overrides to every run (it refuses
 keys that a change sets); `DRY_RUN=1` only prints the commands. Remove old runs with `dvc exp remove` before
 rerunning the same base.

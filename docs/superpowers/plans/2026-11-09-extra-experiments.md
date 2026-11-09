@@ -521,7 +521,7 @@ git commit -m "feat: SSM dynamics LR scale and no-decay-on-A parameter groups"
     | `aug_rotate` | `aug_rotate=1` |
     | `aug_shift` | `aug_shift=0.5` |
     | `norm_set` | `normalization=set` |
-    | `downsample_2`, `downsample_5` | `downsample=2`, `downsample=5` |
+    | `downsample_2`, `downsample_4` | `downsample=2`, `downsample=4` (user, 2026-11-09: powers of 2 only) |
     | `speed_1`, `speed_0p25` | `ssm_speed=1`, `ssm_speed=0.25` |
     | `ssm_lr_0p1` | `ssm_lr_scale=0.1` |
     | `no_decay_a` | `ssm_decay_A=false` |

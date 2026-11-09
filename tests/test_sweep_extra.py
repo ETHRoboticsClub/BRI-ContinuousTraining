@@ -18,29 +18,31 @@ def sweep(*args, base_sets=""):
 
 
 def test_sweep_extra_dry_run():
-    code, out = sweep("tanh", "5", "40")
+    code, out = sweep("tanh", "10", "40")
     assert code == 0
-    assert len(out) == 11 and all(line.startswith("dvc exp run -n x-tanh-k5-s40-") for line in out)
+    assert len(out) == 11 and all(line.startswith("dvc exp run -n x-tanh-k10-s40-") for line in out)
     assert all(
         "src/params.yaml:train.activation=tanh" in line
-        and "src/params.yaml:train.k=5" in line
+        and "src/params.yaml:train.k=10" in line
         and "src/params.yaml:train.example_stride=40" in line
         for line in out
     )
     assert sum("src/params.yaml:train.aug_gain=0.2" in line for line in out) == 1
     names = [line.split()[4] for line in out]
-    assert len(set(names)) == 11 and "x-tanh-k5-s40-baseline" in names
+    assert len(set(names)) == 11 and "x-tanh-k10-s40-baseline" in names
+    assert sum("src/params.yaml:train.downsample=4" in line for line in out) == 1
+    assert not any("train.downsample=5" in line for line in out)
 
 
 def test_sweep_extra_passes_base_sets():
-    code, out = sweep("relu", "1", "40", base_sets="weight_decay=0.05 lr=0.005")
+    code, out = sweep("relu", "10", "40", base_sets="weight_decay=0.05 lr=0.005")
     assert code == 0 and len(out) == 11
     assert all("-S src/params.yaml:train.weight_decay=0.05 -S src/params.yaml:train.lr=0.005" in line for line in out)
 
 
 @pytest.mark.parametrize("base_sets", ["downsample=2", "k=1", "lr=0.005 ssm_decay_A=false"])
 def test_sweep_extra_rejects_conflicting_base(base_sets):
-    code, out = sweep("tanh", "5", "40", base_sets=base_sets)
+    code, out = sweep("tanh", "10", "40", base_sets=base_sets)
     assert code == 1 and out == []
 
 
@@ -65,7 +67,7 @@ def test_each_experiment_starts_from_the_original_params(tmp_path):
     log = tmp_path / "dvc.log"
     env = {**os.environ, "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}", "DVC_LOG": str(log)}
     result = subprocess.run(
-        [BASH, str(tmp_path / "scripts/sweep_extra.sh"), "tanh", "5", "40"], env=env, capture_output=True, text=True
+        [BASH, str(tmp_path / "scripts/sweep_extra.sh"), "tanh", "10", "40"], env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
     runs = log.read_text().split("--- ")[1:]
@@ -73,6 +75,12 @@ def test_each_experiment_starts_from_the_original_params(tmp_path):
     for run in runs:
         assert run.split("\n", 1)[1] == params, run.split("\n", 1)[0]
     assert (tmp_path / "src/params.yaml").read_text() == params  # restored on exit
+
+
+@pytest.mark.parametrize("k", ["1", "5", "15"])  # L = 10, 50, 150: not divisible by 4
+def test_sweep_extra_refuses_downsample_that_does_not_divide_L(k):
+    code, out = sweep("relu", k, "40")
+    assert code == 1 and out == []
 
 
 def test_sweep_extra_usage():

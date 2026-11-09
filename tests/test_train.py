@@ -72,7 +72,7 @@ EXTRA_CHANGES = [
     {"aug_rotate": 1},
     {"aug_shift": 0.5},
     {"downsample": 2},
-    {"downsample": 5},
+    {"downsample": 4, "k": 2},  # L = 20: 4 must divide the kernel length
     {"ssm_speed": 1},
     {"ssm_speed": 0.25},
     {"ssm_lr_scale": 0.1},

@@ -51,7 +51,7 @@ def test_layer_widths():
     assert (m.head[0].C.shape, m.head[2].C.shape) == ((128, 64), (64, 15))
 
 
-@pytest.mark.parametrize("L,s", [(10, 2), (10, 5), (50, 2), (50, 5)])
+@pytest.mark.parametrize("L,s", [(10, 2), (20, 4), (40, 8), (100, 4)])
 def test_downsample_keeps_output_shape(L, s):
     assert Model(8, 15, L, downsample=s)(torch.randn(4, 8, raw_length(L))).shape == (4, 15)
 
@@ -66,12 +66,14 @@ def test_downsample_feeds_every_sth_step_to_ssm2():
 
 
 def test_downsample_inits_ssm2_from_reduced_length():
-    enc = SSMEncoder(36, 50, "tanh", downsample=5)
-    torch.testing.assert_close(enc.ssm2.log_dt, Kernelized(256, 128, 10).log_dt)
-    torch.testing.assert_close(enc.ssm1.log_dt, Kernelized(256, 256, 50).log_dt)
+    enc = SSMEncoder(36, 100, "tanh", downsample=4)
+    torch.testing.assert_close(enc.ssm2.log_dt, Kernelized(256, 128, 25).log_dt)
+    torch.testing.assert_close(enc.ssm1.log_dt, Kernelized(256, 256, 100).log_dt)
 
 
-@pytest.mark.parametrize("L,s", [(10, 3), (10, 10), (10, 0)])
+@pytest.mark.parametrize(
+    "L,s", [(10, 3), (10, 10), (10, 0), (50, 4), (50, 5), (60, 6)]
+)  # (50, 5), (60, 6): not powers of 2
 def test_bad_downsample_raises(L, s):
     with pytest.raises(ValueError):
         SSMEncoder(36, L, "tanh", downsample=s)

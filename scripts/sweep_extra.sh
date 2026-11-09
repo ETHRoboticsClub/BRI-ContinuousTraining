@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if [ "$#" -ne 3 ] || { [ "$1" != "tanh" ] && [ "$1" != "relu" ]; }; then
+if [ "$#" -ne 3 ] || { [ "$1" != "tanh" ] && [ "$1" != "relu" ]; } || ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
   echo "usage: $0 tanh|relu K STRIDE" >&2
   exit 1
 fi
@@ -27,7 +27,7 @@ changes=(
   "aug_shift:aug_shift=0.5"
   "norm_set:normalization=set"
   "downsample_2:downsample=2"
-  "downsample_5:downsample=5"
+  "downsample_4:downsample=4"
   "speed_1:ssm_speed=1"
   "speed_0p25:ssm_speed=0.25"
   "ssm_lr_0p1:ssm_lr_scale=0.1"
@@ -50,6 +50,15 @@ for set in ${base_sets[@]+"${base_sets[@]}"}; do
     fi
   done
   base+=(-S "src/params.yaml:train.$set")
+done
+
+# Downsampling (powers of 2) must divide the kernel length L = 10 k tangent steps, or that run fails mid-sweep.
+for entry in "${changes[@]}"; do
+  change="${entry#*:}"
+  if [ "${change%%=*}" = "downsample" ] && [ $((10 * k % ${change#*=})) -ne 0 ]; then
+    echo "${change} does not divide the kernel length L = $((10 * k)) tangent steps (k = $k)" >&2
+    exit 1
+  fi
 done
 
 dry_run="${DRY_RUN:-0}"
