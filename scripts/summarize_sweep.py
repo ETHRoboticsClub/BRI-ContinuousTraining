@@ -57,7 +57,8 @@ def _column(header: list[str], name: str) -> str | None:
 def read_rows(path: str, columns=COLUMNS) -> list[dict]:
     """Rows with the canonical column names, all activations.
 
-    Rows without a finite validation MAE (baseline workspace row, failed experiments) are skipped.
+    Rows without a finite validation MAE (baseline workspace row, failed experiments) are skipped. Every row also
+    gets "params": all train.* columns, by their canonical name.
     """
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
@@ -66,9 +67,11 @@ def read_rows(path: str, columns=COLUMNS) -> list[dict]:
         missing = [c for c, h in names.items() if h is None]
         if missing:
             raise ValueError(f"{path}: missing column(s) {', '.join(missing)}")
+        train = {h: h.rsplit(":", 1)[-1] for h in header if h.rsplit(":", 1)[-1].startswith("train.")}
         rows = []
         for raw in reader:
             row = {c: raw[h] for c, h in names.items()}
+            row["params"] = {name: raw[h] for h, name in train.items()}
             for c in NUMBERS:
                 if c in row:
                     row[c] = _number(row[c])
@@ -101,7 +104,11 @@ def base_from_filename(path: str) -> tuple[str, str, str] | None:
 
 
 def extra_rows(rows: list[dict], activation: str, k: str, stride: str) -> dict[str, dict]:
-    """Label -> row for the experiments named x-<activation>-k<k>-s<stride>-<label> (the first one listed)."""
+    """Label -> row for the experiments named x-<activation>-k<k>-s<stride>-<label> (the first one listed).
+
+    Every experiment but the baseline must differ from it in exactly one train param; that one is stored as the
+    row's "change" ("key=value"). Otherwise ValueError: the comparison with the baseline would be mislabelled.
+    """
     prefix = f"x-{activation}-k{k}-s{stride}-"
     labeled = {}
     for row in rows:
@@ -109,6 +116,19 @@ def extra_rows(rows: list[dict], activation: str, k: str, stride: str) -> dict[s
             labeled.setdefault(row["Experiment"][len(prefix) :], row)
     if "baseline" not in labeled:
         raise ValueError(f"no {prefix}baseline experiment with {VAL}")
+    base = labeled["baseline"]["params"]
+    labeled["baseline"]["change"] = ""
+    problems = []
+    for label, row in labeled.items():
+        if label == "baseline":
+            continue
+        diff = sorted(key for key in base.keys() | row["params"].keys() if row["params"].get(key) != base.get(key))
+        if len(diff) == 1:
+            row["change"] = f"{diff[0].removeprefix('train.')}={row['params'].get(diff[0])}"
+        else:
+            problems.append(f"{label}: {', '.join(diff) if diff else 'no change'}")
+    if problems:
+        raise ValueError(f"experiments must differ from the baseline in exactly one train param: {'; '.join(problems)}")
     return labeled
 
 
@@ -125,12 +145,13 @@ def main_extra(path: str, activation: str, k: str, stride: str) -> None:
         return "-" if value is None else f"{value:+.2f}" if signed else f"{value:.2f}"
 
     print(f"base: activation={activation} k={k} stride={stride}  (* = val MAE below baseline by > its seed std)")
-    print(f"{'change':<14}{'val MAE':>15}{'d val':>8}{'test MAE':>10}{'d test':>8}")
+    print(f"{'experiment':<14}{'change':<22}{'val MAE':>15}{'d val':>8}{'test MAE':>10}{'d test':>8}")
     for label, r in sorted(rows.items(), key=lambda item: item[1][VAL]):
         val = f"{r[VAL]:.2f} +/- {fmt(r[VAL_STD])}"
         d_test = None if r[TEST] is None or base[TEST] is None else r[TEST] - base[TEST]
         star = " *" if label != "baseline" and beats_baseline(r, base) else ""
-        print(f"{label:<14}{val:>15}{fmt(r[VAL] - base[VAL], True):>8}{fmt(r[TEST]):>10}{fmt(d_test, True):>8}{star}")
+        d_val = fmt(r[VAL] - base[VAL], True)
+        print(f"{label:<14}{r['change']:<22}{val:>15}{d_val:>8}{fmt(r[TEST]):>10}{fmt(d_test, True):>8}{star}")
     label, best = min(rows.items(), key=lambda item: item[1][VAL])
     print(f"\nselected by validation: {label} (val MAE {best[VAL]:.2f})")
     if best[TEST] is None:

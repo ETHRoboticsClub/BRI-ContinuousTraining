@@ -59,9 +59,17 @@ if [ "$dry_run" != "1" ]; then
   dvc push
 fi
 
+# dvc exp run -S writes into src/params.yaml and leaves it there, so without this every change would carry over
+# into the following runs. Each run starts from the params as they were when the script started; so does the
+# workspace afterwards.
+params_snapshot="$(mktemp)"
+cp src/params.yaml "$params_snapshot"
+trap 'cp "$params_snapshot" src/params.yaml; rm -f "$params_snapshot"' EXIT
+
 for entry in "${changes[@]}"; do
   label="${entry%%:*}"
   change="${entry#*:}"
+  cp "$params_snapshot" src/params.yaml
   cmd=(dvc exp run -n "x-$activation-k$k-s$stride-$label" "${base[@]}")
   if [ -n "$change" ]; then
     cmd+=(-S "src/params.yaml:train.$change")

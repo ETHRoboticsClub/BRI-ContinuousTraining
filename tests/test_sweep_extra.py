@@ -44,6 +44,37 @@ def test_sweep_extra_rejects_conflicting_base(base_sets):
     assert code == 1 and out == []
 
 
+STUB_DVC = """#!/usr/bin/env bash
+# Stand-in for dvc: on `exp run`, log params.yaml as the run sees it, then leave an edit behind like dvc's -S does.
+if [ "$1 $2" = "exp run" ]; then
+  { echo "--- $4"; cat src/params.yaml; } >> "$DVC_LOG"
+  echo "  leftover_from_$4: 1" >> src/params.yaml
+fi
+"""
+
+
+def test_each_experiment_starts_from_the_original_params(tmp_path):
+    """dvc exp run -S writes into the workspace params.yaml and leaves it there; no change may reach the next run."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "bin").mkdir()
+    shutil.copy(SCRIPT, tmp_path / "scripts/sweep_extra.sh")
+    params = "train:\n  aug_gain: 0.0\n"
+    (tmp_path / "src/params.yaml").write_text(params, newline="\n")
+    (tmp_path / "bin/dvc").write_text(STUB_DVC, newline="\n")
+    log = tmp_path / "dvc.log"
+    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}", "DVC_LOG": str(log)}
+    result = subprocess.run(
+        [BASH, str(tmp_path / "scripts/sweep_extra.sh"), "tanh", "5", "40"], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    runs = log.read_text().split("--- ")[1:]
+    assert len(runs) == 11
+    for run in runs:
+        assert run.split("\n", 1)[1] == params, run.split("\n", 1)[0]
+    assert (tmp_path / "src/params.yaml").read_text() == params  # restored on exit
+
+
 def test_sweep_extra_usage():
     assert sweep("tanh", "5")[0] == 1
     assert sweep("gelu", "5", "40")[0] == 1

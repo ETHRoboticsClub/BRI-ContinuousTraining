@@ -95,7 +95,10 @@ def test_dvc_367_header_without_file_prefix(tmp_path):
     assert select(rows)["test.mae.mean"] == 16.4
 
 
-EXTRA_HEADER = "Experiment,rev,val.mae.mean,val.mae.std,test.mae.mean,train.k"
+EXTRA_HEADER = (
+    "Experiment,rev,val.mae.mean,val.mae.std,test.mae.mean,"
+    "src/params.yaml:train.k,src/params.yaml:train.aug_gain,src/params.yaml:train.ssm_speed"
+)
 
 
 def _write_extra(tmp_path, lines, name="extra_tanh_k5_s40.csv"):
@@ -105,12 +108,12 @@ def _write_extra(tmp_path, lines, name="extra_tanh_k5_s40.csv"):
 
 
 EXTRA_LINES = [
-    "workspace,abc,!,!,!,5",
-    "x-tanh-k5-s40-baseline,r1,17.0,0.3,17.5,5",
-    "x-tanh-k5-s40-aug_gain,r2,16.6,0.2,17.9,5",
-    "x-tanh-k5-s40-speed_1,r3,16.8,0.2,16.0,5",
-    "x-tanh-k1-s40-aug_gain,r4,10.0,0.1,10.0,1",  # another base configuration
-    "x-relu-k5-s40-aug_gain,r5,10.0,0.1,10.0,5",  # another activation
+    "workspace,abc,!,!,!,5,0.0,4",
+    "x-tanh-k5-s40-baseline,r1,17.0,0.3,17.5,5,0.0,4",
+    "x-tanh-k5-s40-aug_gain,r2,16.6,0.2,17.9,5,0.2,4",
+    "x-tanh-k5-s40-speed_1,r3,16.8,0.2,16.0,5,0.0,1",
+    "x-tanh-k1-s40-aug_gain,r4,10.0,0.1,10.0,1,0.2,4",  # another base configuration
+    "x-relu-k5-s40-aug_gain,r5,10.0,0.1,10.0,5,0.2,4",  # another activation
 ]
 
 
@@ -142,3 +145,17 @@ def test_extra_selection_ignores_test(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "selected by validation: aug_gain" in out  # speed_1 has the best test MAE but a worse val MAE
     assert "-0.40" in out  # aug_gain's val delta vs the baseline
+    assert "ssm_speed=1" in out  # the change each row made, read from its params
+
+
+@pytest.mark.parametrize(
+    "line,problem",
+    [
+        ("x-tanh-k5-s40-speed_1,r3,16.8,0.2,16.0,5,0.2,1", "aug_gain"),  # a previous change carried over
+        ("x-tanh-k5-s40-speed_1,r3,16.8,0.2,16.0,5,0.0,4", "no change"),  # nothing differs from the baseline
+    ],
+)
+def test_extra_rows_require_exactly_one_change(tmp_path, line, problem):
+    lines = [x for x in EXTRA_LINES if "speed_1" not in x] + [line]
+    with pytest.raises(ValueError, match=problem):
+        extra_rows(read_rows(_write_extra(tmp_path, lines), EXTRA_COLUMNS), "tanh", "5", "40")
