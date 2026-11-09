@@ -1,5 +1,18 @@
 import torch
 
+# EMG channel indices in order around the armband. The paper (Colot et al., Section II-A) has the 8 electrodes evenly
+# spaced around the forearm. The order is from the data: in 18 of 20 subjects, EMG 1 -> 2 -> ... -> 8 -> 1 is the
+# ring of all 2520 that maximizes the summed |correlation| between neighbours (5th and 12th in the other two).
+RING_ORDER = tuple(range(8))
+
+
+def rotate(x: torch.Tensor, r: int, order=RING_ORDER) -> torch.Tensor:
+    """Move the channel at ring position i of x [8, T] to ring position i + r (mod 8)."""
+    idx = torch.tensor(order)
+    out = torch.empty_like(x)
+    out[idx] = x[idx].roll(r, 0)
+    return out
+
 
 def channel_gain(x: torch.Tensor, log_gain: torch.Tensor) -> torch.Tensor:
     """Scale each channel of x [C, T] by exp(log_gain[c])."""
@@ -30,6 +43,8 @@ class Augment:
         self.generator.manual_seed(seed)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rotate:
+            x = rotate(x, int(torch.randint(-self.rotate, self.rotate + 1, (), generator=self.generator)))
         if self.gain:
             x = channel_gain(x, self.gain * torch.randn(x.shape[0], generator=self.generator))
         return x

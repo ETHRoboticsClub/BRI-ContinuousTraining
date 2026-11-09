@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.augment import Augment, channel_gain
+from src.augment import Augment, channel_gain, rotate
 
 ZEROS = {"aug_gain": 0.0, "aug_rotate": 0, "aug_shift": 0.0}
 
@@ -54,3 +54,25 @@ def test_augment_leaves_global_rng_alone():
 def test_negative_strengths_raise(kwargs):
     with pytest.raises(ValueError):
         Augment(**kwargs)
+
+
+def test_rotate_is_roll_in_ring_order():
+    x = torch.arange(8.0)[:, None].expand(8, 5)
+    torch.testing.assert_close(rotate(x, 1, order=tuple(range(8))), x.roll(1, 0))
+    order = (0, 2, 4, 6, 1, 3, 5, 7)
+    y = rotate(x, 1, order=order)
+    assert [int(y[c, 0]) for c in order] == [order[(i - 1) % 8] for i in range(8)]
+
+
+def test_rotate_full_turn_is_identity():
+    x = torch.randn(8, 20)
+    assert torch.equal(rotate(x, 8), x)
+    assert torch.equal(rotate(x, -1), rotate(x, 7))
+
+
+def test_rotation_draws_cover_minus_R_to_R():
+    aug = Augment(rotate=1)
+    aug.manual_seed(0)
+    x = torch.arange(8.0)[:, None]
+    seen = {int(aug(x)[0, 0].item()) for _ in range(300)}  # channel 0 receives channel -r
+    assert {(-v) % 8 for v in seen} == {0, 1, 7}

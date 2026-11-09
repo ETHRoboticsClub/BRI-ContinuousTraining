@@ -57,6 +57,7 @@ target. Train examples are `example_stride` raw samples apart; validation and te
 | `activation` | `tanh` or `relu` |
 | `normalization` | EMG z-score per channel: `subject` (each recording on its own statistics), `set` (statistics pooled over the recordings of each split, so only training changes: validation and test are one subject each) or `none` |
 | `aug_gain` | Training examples only: each EMG channel is scaled by `exp(N(0, aug_gain))`, drawn per example; 0 = off |
+| `aug_rotate` | Training examples only: the 8 channels are rotated around the electrode ring by r ~ U{-aug_rotate, ..., aug_rotate} electrodes, drawn per example; 0 = off |
 | `seeds` | One model is trained per seed; metrics are reported as mean and sample std over seeds |
 
 ## Run
