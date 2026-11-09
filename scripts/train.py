@@ -61,7 +61,9 @@ def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
         seed_dir.mkdir(parents=True, exist_ok=True)
 
         # Build model and optimization
-        model = Model(train_set.channels, train_set.targets, length, params["activation"]).to(device)
+        model = Model(
+            train_set.channels, train_set.targets, length, params["activation"], downsample=params["downsample"]
+        ).to(device)
         loss_fn = nn.HuberLoss()
         optimizer = torch.optim.AdamW(model.parameters(), lr=params["lr"], weight_decay=params["weight_decay"])
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, params["epochs"])

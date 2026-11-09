@@ -14,6 +14,7 @@ train:
   aug_gain: 0.0           # training examples only: std of the log per-channel gain; 0 = off
   aug_rotate: 0           # training examples only: max rotation around the electrode ring, whole electrodes; 0 = off
   aug_shift: 0.0          # training examples only: max fractional shift around the ring, electrodes; 0 = off
+  downsample: 1           # keep every s-th tangent step after the first SSM layer; must divide the kernel length
   batch_size: 256
   lr: 0.0002
   weight_decay: 0.0001

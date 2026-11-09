@@ -67,7 +67,16 @@ def test_only_training_examples_are_augmented(data_dir):
         assert ds.augment is None and torch.equal(ds[0][0], ds[0][0])
 
 
-@pytest.mark.parametrize("change", [{"aug_gain": 0.2}, {"aug_rotate": 1}, {"aug_shift": 0.5}])
+EXTRA_CHANGES = [
+    {"aug_gain": 0.2},
+    {"aug_rotate": 1},
+    {"aug_shift": 0.5},
+    {"downsample": 2},
+    {"downsample": 5},
+]
+
+
+@pytest.mark.parametrize("change", EXTRA_CHANGES)
 def test_run_with_each_extra_change(tmp_path, data_dir, change):
     m = run({**PARAMS, "seeds": [0], **change}, data_dir, tmp_path / "out")
     assert np.isfinite(m["val"]["mae"]["mean"])

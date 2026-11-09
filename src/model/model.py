@@ -12,11 +12,19 @@ class Model(nn.Module):
     Tangent-space covariances -> projection -> two Kernelized SSM layers -> dense head. No layer has a bias.
     """
 
-    def __init__(self, channels: int, targets: int, length: int, activation: str = "tanh", hidden: int = 64) -> None:
+    def __init__(
+        self,
+        channels: int,
+        targets: int,
+        length: int,
+        activation: str = "tanh",
+        hidden: int = 64,
+        downsample: int = 1,
+    ) -> None:
         super().__init__()
         self.length = length
         self.tangent_space = TangentSpace(channels)
-        self.encoder = SSMEncoder(self.tangent_space.out_dim, length, activation)
+        self.encoder = SSMEncoder(self.tangent_space.out_dim, length, activation, downsample=downsample)
         self.head = nn.Sequential(
             KernelizedLinear(self.encoder.out_dim, hidden),
             make_activation(activation),

@@ -59,6 +59,7 @@ target. Train examples are `example_stride` raw samples apart; validation and te
 | `aug_gain` | Training examples only: each EMG channel is scaled by `exp(N(0, aug_gain))`, drawn per example; 0 = off |
 | `aug_rotate` | Training examples only: the 8 channels are rotated around the electrode ring by r ~ U{-aug_rotate, ..., aug_rotate} electrodes, drawn per example; 0 = off |
 | `aug_shift` | Training examples only: fractional rotation by u ~ U(-aug_shift, aug_shift) electrodes, linearly interpolating between ring neighbours, drawn per example; 0 = off |
+| `downsample` | Keep every s-th tangent step after the first SSM layer (MetaTF's `Stride`); the second SSM layer sees L / s steps. s must divide L and leave at least 2 steps |
 | `seeds` | One model is trained per seed; metrics are reported as mean and sample std over seeds |
 
 ## Run
