@@ -2,6 +2,7 @@
 #
 #   sky launch -c hri-gpu sky/train.yaml --env SMOKE_TEST=1   # first time: create the machine, check GPU + S3
 #   sky exec hri-gpu sky/train.yaml                           # sync the code and run: dvc pull -> repro -> push
+#   sky exec hri-gpu sky/train.yaml --env SWEEP=tanh          # k x stride sweep (or relu) -> sweep_tanh.csv
 #   sky/fetch.sh                                              # bring dvc.lock + metrics back, then commit
 #   sky stop hri-gpu / sky start hri-gpu                      # pause / resume (stops automatically when idle)
 
@@ -19,6 +20,7 @@ file_mounts:
 
 envs:
   SMOKE_TEST: 0
+  SWEEP: ""               # tanh or relu: run scripts/sweep.sh instead of dvc repro
 
 setup: |
   set -e
@@ -34,6 +36,10 @@ run: |
     nvidia-smi --query-gpu=name,memory.total --format=csv
     python -c "import torch; print('CUDA:', torch.cuda.is_available())"
     dvc status --cloud   # fails if S3 is not reachable
+    exit 0
+  fi
+  if [ -n "$SWEEP" ]; then
+    bash scripts/sweep.sh "$SWEEP"
     exit 0
   fi
   dvc pull --allow-missing

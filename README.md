@@ -23,6 +23,8 @@ dvc.yaml               pipeline: build_dataset -> train
 scripts/
   build_dataset.py     download EMG-FK, preprocess, save whole recordings to data/processed/emg_fk
   train.py             load data, load model, train -> output/
+  sweep.sh             k x example_stride sweep as DVC experiments, one activation
+  summarize_sweep.py   pick the configuration with the lowest validation MAE, compare test MAE with the paper
 src/
   params.yaml          preprocessing and training parameters
   preprocess.py        Preprocess: causal notch + bandpass filter
@@ -63,6 +65,22 @@ dvc push                   # share the built dataset and output/
 ```
 
 or without DVC: `python scripts/build_dataset.py` then `python scripts/train.py`.
+
+## Sweep
+
+`scripts/sweep.sh tanh|relu` builds the dataset, then runs one `dvc exp run` per configuration (k=1 with stride
+40, 120, 240; k=5 with stride 40, 240, 520, 1040) and writes `sweep_<activation>.csv` (`dvc exp show --csv`).
+On the GPU machine:
+
+```bash
+sky exec hri-gpu sky/train.yaml --env SWEEP=tanh   # then SWEEP=relu
+rsync -av hri-gpu:sky_workdir/sweep_tanh.csv .
+python scripts/summarize_sweep.py sweep_tanh.csv
+```
+
+The summary lists val and test MAE of every configuration and selects the one with the lowest **validation** MAE
+(test is never used for selection). Verdict on its test MAE against the paper's 16.71 degrees: `success` below
+16.71, `threshold` up to 17.21, otherwise `miss`.
 
 ## Data versioning
 
