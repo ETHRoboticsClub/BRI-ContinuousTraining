@@ -75,6 +75,8 @@ EXTRA_CHANGES = [
     {"downsample": 5},
     {"ssm_speed": 1},
     {"ssm_speed": 0.25},
+    {"ssm_lr_scale": 0.1},
+    {"ssm_decay_A": False},
 ]
 
 

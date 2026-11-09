@@ -11,7 +11,7 @@ from src.augment import Augment
 from src.dataset import EMGFK, kernel_length, recording_path, shortest_recording
 from src.model.model import Model
 from src.model.tangent_space import raw_length
-from src.trainer import evaluate, fit, save_history
+from src.trainer import evaluate, fit, param_groups, save_history
 
 DATA_DIR = Path("data/processed/emg_fk")
 OUT_DIR = Path("output")
@@ -70,7 +70,10 @@ def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
             ssm_speed=params["ssm_speed"],
         ).to(device)
         loss_fn = nn.HuberLoss()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=params["lr"], weight_decay=params["weight_decay"])
+        groups = param_groups(
+            model, params["lr"], params["weight_decay"], params["ssm_lr_scale"], params["ssm_decay_A"]
+        )
+        optimizer = torch.optim.AdamW(groups)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, params["epochs"])
 
         # Train

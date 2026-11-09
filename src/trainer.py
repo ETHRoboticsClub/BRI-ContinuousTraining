@@ -4,6 +4,23 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from src.model.kernelized import Kernelized
+
+
+def param_groups(model, lr: float, weight_decay: float, ssm_lr_scale: float = 1.0, ssm_decay_A: bool = True) -> list:
+    """AdamW parameter groups. The SSM dynamics (A and log_dt of every Kernelized layer) train at lr * ssm_lr_scale,
+    and A is left out of weight decay if not ssm_decay_A. Parameters with equal settings share a group."""
+    if ssm_lr_scale <= 0:
+        raise ValueError(f"ssm_lr_scale must be > 0, got {ssm_lr_scale}")
+    ssm = [m for m in model.modules() if isinstance(m, Kernelized)]
+    dynamics = {id(p) for m in ssm for p in (m.A, m.log_dt)}
+    no_decay = set() if ssm_decay_A else {id(m.A) for m in ssm}
+    groups = {}
+    for p in model.parameters():
+        key = (lr * ssm_lr_scale if id(p) in dynamics else lr, 0.0 if id(p) in no_decay else weight_decay)
+        groups.setdefault(key, []).append(p)
+    return [{"params": ps, "lr": g_lr, "weight_decay": g_wd} for (g_lr, g_wd), ps in groups.items()]
+
 
 def train_epoch(model, loader, loss_fn, optimizer, device, grad_clip=None) -> float:
     """One pass over loader; returns the mean training loss."""
