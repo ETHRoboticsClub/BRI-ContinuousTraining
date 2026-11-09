@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from scripts.summarize_sweep import (
@@ -6,8 +8,10 @@ from scripts.summarize_sweep import (
     base_from_filename,
     beats_baseline,
     extra_rows,
+    extra_rows_from_dirs,
     for_activation,
     main_extra,
+    main_extra_dirs,
     read_rows,
     select,
     verdict,
@@ -159,3 +163,49 @@ def test_extra_rows_require_exactly_one_change(tmp_path, line, problem):
     lines = [x for x in EXTRA_LINES if "speed_1" not in x] + [line]
     with pytest.raises(ValueError, match=problem):
         extra_rows(read_rows(_write_extra(tmp_path, lines), EXTRA_COLUMNS), "tanh", "5", "40")
+
+
+def write_experiment(d, val, std, test, params=None):
+    """A finished experiment directory as scripts/train.py writes it (metrics.json), plus params.json if given."""
+    d.mkdir(parents=True)
+    split = lambda mae, sd: {"mae": {"mean": mae, "std": sd}}  # noqa: E731
+    (d / "metrics.json").write_text(json.dumps({"val": split(val, std), "test": split(test, 0.0)}))
+    if params is not None:
+        (d / "params.json").write_text(json.dumps(params))
+
+
+BASE_PARAMS = {"k": 10, "aug_gain": 0.0, "ssm_speed": 4}
+
+
+def extra_dirs(tmp_path):
+    """An extra sweep directory with two finished experiments and one unfinished, and a separate old baseline."""
+    out = tmp_path / "extra_relu_k10_s40"
+    out.mkdir()
+    (out / "base_params.json").write_text(json.dumps(BASE_PARAMS))
+    write_experiment(tmp_path / "k10_s40", 21.08, 0.55, 18.40)  # old baseline run: no params.json
+    write_experiment(out / "aug_gain", 20.40, 0.30, 18.90, {**BASE_PARAMS, "aug_gain": 0.2})
+    write_experiment(out / "speed_1", 21.30, 0.20, 17.00, {**BASE_PARAMS, "ssm_speed": 1})
+    (out / "aug_rotate").mkdir()  # unfinished: no metrics.json
+    return out, tmp_path / "k10_s40"
+
+
+def test_extra_rows_from_dirs(tmp_path):
+    rows = extra_rows_from_dirs(*extra_dirs(tmp_path))
+    assert set(rows) == {"baseline", "aug_gain", "speed_1"}
+    assert rows["baseline"]["val.mae.mean"] == 21.08 and rows["baseline"]["val.mae.std"] == 0.55
+    assert rows["aug_gain"]["change"] == "aug_gain=0.2" and rows["speed_1"]["change"] == "ssm_speed=1"
+
+
+def test_extra_rows_from_dirs_require_exactly_one_change(tmp_path):
+    out, baseline = extra_dirs(tmp_path)
+    (out / "speed_1/params.json").write_text(json.dumps({**BASE_PARAMS, "ssm_speed": 1, "aug_gain": 0.2}))
+    with pytest.raises(ValueError, match="aug_gain"):
+        extra_rows_from_dirs(out, baseline)
+
+
+def test_directory_summary_selects_by_validation(tmp_path, capsys):
+    out, baseline = extra_dirs(tmp_path)
+    main_extra_dirs(out, baseline)
+    printed = capsys.readouterr().out
+    assert "selected by validation: aug_gain" in printed  # speed_1 has the best test MAE but a worse val MAE
+    assert "-0.68" in printed  # aug_gain's val delta vs the baseline

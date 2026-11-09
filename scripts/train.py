@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -46,8 +47,22 @@ def aggregate(per_seed: list[dict]) -> dict:
     }
 
 
-def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
-    """Train one model per seed, test each best checkpoint, write history.csv and metrics.json to out_dir."""
+def write_atomic(path: Path, text: str) -> None:
+    """Write through a synced temporary file and a rename, so a power cut never leaves a truncated file."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def run(params: dict, data_dir: Path, out_dir: Path, resume: bool = False) -> dict:
+    """Train one model per seed, test each best checkpoint, write history.csv and metrics.json to out_dir.
+
+    Each finished seed is saved to seed_<n>/result.json. With resume, a seed whose result.json was made with the
+    same params is reused instead of retrained, so an interrupted run continues from its first unfinished seed.
+    """
     data_dir, out_dir = Path(data_dir), Path(out_dir)
     device = params["device"] if torch.cuda.is_available() else "cpu"
     length = kernel_length(params["k"], shortest_recording(data_dir))
@@ -59,6 +74,14 @@ def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
             train_set.augment.manual_seed(seed)
         seed_dir = out_dir / f"seed_{seed}"
         seed_dir.mkdir(parents=True, exist_ok=True)
+        result_path = seed_dir / "result.json"
+        if resume and result_path.exists():
+            saved = json.loads(result_path.read_text())
+            if saved["params"] == json.loads(json.dumps(params)):
+                print(f"seed {seed}: reusing the finished run in {result_path}")
+                history += saved["history"]
+                seeds[str(seed)] = {"val": saved["val"], "test": saved["test"]}
+                continue
 
         # Build model and optimization
         model = Model(
@@ -81,13 +104,16 @@ def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
             model, train_loader, val_loader, loss_fn, optimizer, scheduler,
             params["epochs"], device, seed_dir / "best_model.pt", params["grad_clip"],
         )  # fmt: skip
-        history += [{"seed": seed, **row} for row in seed_history]
+        seed_history = [{"seed": seed, **row} for row in seed_history]
+        history += seed_history
 
         # Test the best checkpoint
         model.load_state_dict(torch.load(seed_dir / "best_model.pt", map_location=device))
         test = evaluate(model, test_loader, device)
         print(f"seed {seed}: val mae {val['mae']:.2f} | test r2 {test['r2']:.4f} mae {test['mae']:.2f}")
         seeds[str(seed)] = {"val": val, "test": test}
+        result = {"params": params, "val": val, "test": test, "history": seed_history}
+        write_atomic(result_path, json.dumps(result, indent=2))
 
     metrics = {
         "kernel_length": length,
@@ -96,7 +122,7 @@ def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
         "seeds": seeds,
     }
     save_history(history, out_dir / "history.csv")
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    write_atomic(out_dir / "metrics.json", json.dumps(metrics, indent=2))
     return metrics
 
 

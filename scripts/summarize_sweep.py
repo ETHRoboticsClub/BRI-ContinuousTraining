@@ -10,10 +10,12 @@ against the baseline rerun instead, and selects the change with the lowest valid
 
 import argparse
 import csv
+import json
 import math
 import os
 import re
 import sys
+from pathlib import Path
 
 PAPER_MAE = 16.71
 TOLERANCE = 0.5  # degrees above the paper that still counts as a threshold result
@@ -116,6 +118,11 @@ def extra_rows(rows: list[dict], activation: str, k: str, stride: str) -> dict[s
             labeled.setdefault(row["Experiment"][len(prefix) :], row)
     if "baseline" not in labeled:
         raise ValueError(f"no {prefix}baseline experiment with {VAL}")
+    return label_changes(labeled)
+
+
+def label_changes(labeled: dict[str, dict]) -> dict[str, dict]:
+    """Store each row's single param difference from labeled["baseline"] as its "change"; ValueError otherwise."""
     base = labeled["baseline"]["params"]
     labeled["baseline"]["change"] = ""
     problems = []
@@ -137,14 +144,50 @@ def beats_baseline(row: dict, base: dict) -> bool:
     return base[VAL] - row[VAL] > (base[VAL_STD] or 0.0)
 
 
+def _experiment_row(exp_dir: Path, params: dict) -> dict:
+    metrics = json.loads((exp_dir / "metrics.json").read_text())
+    return {
+        VAL: metrics["val"]["mae"]["mean"],
+        VAL_STD: metrics["val"]["mae"]["std"],
+        TEST: metrics["test"]["mae"]["mean"],
+        "params": {f"train.{key}": value for key, value in params.items()},
+    }
+
+
+def extra_rows_from_dirs(out_dir, baseline_dir=None) -> dict[str, dict]:
+    """Label -> row for the finished experiments of scripts/sweep_extra_local.py in out_dir (<label>/metrics.json).
+
+    The baseline is out_dir/baseline, or baseline_dir (e.g. an earlier run of the same base configuration), whose
+    params are taken to be out_dir/base_params.json. Each change is checked as in label_changes.
+    """
+    out_dir = Path(out_dir)
+    base_params = json.loads((out_dir / "base_params.json").read_text())
+    labeled = {"baseline": _experiment_row(Path(baseline_dir or out_dir / "baseline"), base_params)}
+    for exp_dir in sorted(out_dir.iterdir()):
+        if exp_dir.name != "baseline" and (exp_dir / "metrics.json").exists():
+            labeled[exp_dir.name] = _experiment_row(exp_dir, json.loads((exp_dir / "params.json").read_text()))
+    return label_changes(labeled)
+
+
 def main_extra(path: str, activation: str, k: str, stride: str) -> None:
     rows = extra_rows(read_rows(path, EXTRA_COLUMNS), activation, k, stride)
+    print_extra(rows, f"activation={activation} k={k} stride={stride}")
+
+
+def main_extra_dirs(out_dir, baseline_dir=None) -> None:
+    base = json.loads((Path(out_dir) / "base_params.json").read_text())
+    rows = extra_rows_from_dirs(out_dir, baseline_dir)
+    print_extra(rows, f"activation={base.get('activation')} k={base.get('k')} stride={base.get('example_stride')}")
+
+
+def print_extra(rows: dict[str, dict], title: str) -> None:
+    """Each change against the baseline, sorted by val MAE, and the change selected by validation."""
     base = rows["baseline"]
 
     def fmt(value: float | None, signed: bool = False) -> str:
         return "-" if value is None else f"{value:+.2f}" if signed else f"{value:.2f}"
 
-    print(f"base: activation={activation} k={k} stride={stride}  (* = val MAE below baseline by > its seed std)")
+    print(f"base: {title}  (* = val MAE below baseline by > its seed std)")
     print(f"{'experiment':<14}{'change':<22}{'val MAE':>15}{'d val':>8}{'test MAE':>10}{'d test':>8}")
     for label, r in sorted(rows.items(), key=lambda item: item[1][VAL]):
         val = f"{r[VAL]:.2f} +/- {fmt(r[VAL_STD])}"
@@ -184,9 +227,18 @@ def main(path: str, activation: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("csv", help="sweep_<activation>.csv or extra_<activation>_k<K>_s<STRIDE>.csv")
+    parser.add_argument(
+        "csv", help="sweep_<activation>.csv, extra_<activation>_k<K>_s<STRIDE>.csv, or a sweep_extra_local directory"
+    )
     parser.add_argument("--activation", help="default: taken from the csv file name")
+    parser.add_argument("--baseline", help="directory mode: baseline run directory (default: <directory>/baseline)")
     args = parser.parse_args()
+    if os.path.isdir(args.csv):
+        try:
+            main_extra_dirs(args.csv, args.baseline)
+        except (ValueError, FileNotFoundError) as e:
+            sys.exit(str(e))
+        sys.exit(0)
     extra = base_from_filename(args.csv)
     if extra is not None:
         try:

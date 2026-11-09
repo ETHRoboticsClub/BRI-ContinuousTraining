@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -84,3 +85,38 @@ EXTRA_CHANGES = [
 def test_run_with_each_extra_change(tmp_path, data_dir, change):
     m = run({**PARAMS, "seeds": [0], **change}, data_dir, tmp_path / "out")
     assert np.isfinite(m["val"]["mae"]["mean"])
+
+
+def count_fit(monkeypatch):
+    """Patch scripts.train.fit to count its calls; returns the list it appends to."""
+    import scripts.train as train_module
+
+    calls, real_fit = [], train_module.fit
+    monkeypatch.setattr(train_module, "fit", lambda *a, **k: calls.append(1) or real_fit(*a, **k))
+    return calls
+
+
+def test_run_resumes_finished_seeds(tmp_path, data_dir, monkeypatch):
+    out = tmp_path / "out"
+    first = run(PARAMS, data_dir, out, resume=True)
+    (out / "metrics.json").unlink()
+    (out / "seed_1/result.json").unlink()  # as if the laptop turned off while training seed 1
+    calls = count_fit(monkeypatch)
+    second = run(PARAMS, data_dir, out, resume=True)
+    assert len(calls) == 1
+    assert second["seeds"]["0"] == first["seeds"]["0"]
+    assert {r["seed"] for r in csv.DictReader(open(out / "history.csv"))} == {"0", "1"}
+
+
+def test_resume_ignores_results_from_other_params(tmp_path, data_dir, monkeypatch):
+    run(PARAMS, data_dir, tmp_path / "out", resume=True)
+    calls = count_fit(monkeypatch)
+    run({**PARAMS, "aug_gain": 0.2}, data_dir, tmp_path / "out", resume=True)
+    assert len(calls) == 2
+
+
+def test_run_without_resume_retrains(tmp_path, data_dir, monkeypatch):
+    run(PARAMS, data_dir, tmp_path / "out")
+    calls = count_fit(monkeypatch)
+    run(PARAMS, data_dir, tmp_path / "out")
+    assert len(calls) == 2

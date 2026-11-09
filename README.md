@@ -25,6 +25,7 @@ scripts/
   train.py             load data, load model, train -> output/
   sweep.sh             k x example_stride sweep as DVC experiments, one activation
   sweep_extra.sh       augmentation / normalization / SSM regularization changes, one at a time, on one base
+  sweep_extra_local.py the same without DVC, resumable after the machine turns off
   summarize_sweep.py   pick the configuration with the lowest validation MAE, compare test MAE with the paper
 src/
   params.yaml          preprocessing and training parameters
@@ -108,6 +109,13 @@ sky exec hri-gpu sky/train.yaml --env EXTRA="tanh 5 40" --env BASE_SETS=""
 rsync -av hri-gpu:sky_workdir/extra_tanh_k5_s40.csv .
 python scripts/summarize_sweep.py extra_tanh_k5_s40.csv
 ```
+
+On a laptop without DVC, `python -m scripts.sweep_extra_local relu 10 40 [--start aug_gain]` runs the same 11
+experiments (from `--start` on) into `output/extra_<activation>_k<K>_s<STRIDE>/<change>/`. Rerunning the same
+command resumes: finished experiments and finished seeds are skipped, so a shutdown costs at most the seed in
+progress. While it runs, Windows does not sleep on idle (closing the lid or shutting down still stops it).
+Summarize with `python scripts/summarize_sweep.py output/extra_relu_k10_s40 --baseline output/sweep_relu/k10_s40`
+(`--baseline` when the baseline was not rerun).
 
 The summary prints each change's val MAE (mean ± seed std) and test MAE with their differences from the baseline,
 marks the changes whose val MAE is below the baseline's by more than its seed std, and selects the change with the
