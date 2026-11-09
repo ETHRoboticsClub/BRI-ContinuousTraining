@@ -3,6 +3,7 @@
 #   sky launch -c hri-gpu sky/train.yaml --env SMOKE_TEST=1   # first time: create the machine, check GPU + S3
 #   sky exec hri-gpu sky/train.yaml                           # sync the code and run: dvc pull -> repro -> push
 #   sky exec hri-gpu sky/train.yaml --env SWEEP=tanh          # k x stride sweep (or relu) -> sweep_tanh.csv
+#   sky exec hri-gpu sky/train.yaml --env EXTRA="tanh 5 40"   # extra experiments -> extra_tanh_k5_s40.csv
 #   sky/fetch.sh                                              # bring dvc.lock + metrics back, then commit
 #   sky stop hri-gpu / sky start hri-gpu                      # pause / resume (stops automatically when idle)
 
@@ -21,6 +22,8 @@ file_mounts:
 envs:
   SMOKE_TEST: 0
   SWEEP: ""               # tanh or relu: run scripts/sweep.sh instead of dvc repro
+  EXTRA: ""               # "<activation> <k> <stride>": run scripts/sweep_extra.sh instead of dvc repro
+  BASE_SETS: ""           # extra base overrides for EXTRA, e.g. "weight_decay=0.05 lr=0.005"
 
 setup: |
   set -e
@@ -40,6 +43,10 @@ run: |
   fi
   if [ -n "$SWEEP" ]; then
     bash scripts/sweep.sh "$SWEEP"
+    exit 0
+  fi
+  if [ -n "$EXTRA" ]; then
+    bash scripts/sweep_extra.sh $EXTRA   # unquoted: three arguments; BASE_SETS is read from the environment
     exit 0
   fi
   dvc pull --allow-missing

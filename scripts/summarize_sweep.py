@@ -3,6 +3,9 @@
 Reads the CSV written by `dvc exp show --csv`, prints every configuration's validation and test MAE,
 selects the configuration with the lowest validation MAE (test is never used for selection) and
 gives the verdict against the paper's cross-subject test MAE of 16.71 degrees.
+
+For an extra sweep (extra_<activation>_k<K>_s<STRIDE>.csv, from scripts/sweep_extra.sh) it prints each change
+against the baseline rerun instead, and selects the change with the lowest validation MAE.
 """
 
 import argparse
@@ -18,7 +21,10 @@ TOLERANCE = 0.5  # degrees above the paper that still counts as a threshold resu
 VAL = "val.mae.mean"
 TEST = "test.mae.mean"
 EXPECTED_CONFIGS = 7  # k=1 with 3 strides, k=5 with 4 strides
+VAL_STD = "val.mae.std"
 COLUMNS = (VAL, TEST, "train.k", "train.example_stride", "train.activation")
+EXTRA_COLUMNS = ("Experiment", VAL, VAL_STD, TEST)
+NUMBERS = (VAL, VAL_STD, TEST)
 
 
 def select(rows: list[dict]) -> dict:
@@ -48,7 +54,7 @@ def _column(header: list[str], name: str) -> str | None:
     return next((h for h in header if h == name or h.endswith(":" + name)), None)
 
 
-def read_rows(path: str) -> list[dict]:
+def read_rows(path: str, columns=COLUMNS) -> list[dict]:
     """Rows with the canonical column names, all activations.
 
     Rows without a finite validation MAE (baseline workspace row, failed experiments) are skipped.
@@ -56,15 +62,16 @@ def read_rows(path: str) -> list[dict]:
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         header = reader.fieldnames or []
-        names = {c: _column(header, c) for c in COLUMNS}
+        names = {c: _column(header, c) for c in columns}
         missing = [c for c, h in names.items() if h is None]
         if missing:
             raise ValueError(f"{path}: missing column(s) {', '.join(missing)}")
         rows = []
         for raw in reader:
             row = {c: raw[h] for c, h in names.items()}
-            for c in (VAL, TEST):
-                row[c] = _number(row[c])
+            for c in NUMBERS:
+                if c in row:
+                    row[c] = _number(row[c])
             if row[VAL] is not None:
                 rows.append(row)
     return rows
@@ -85,6 +92,51 @@ def for_activation(rows: list[dict], activation: str) -> list[dict]:
 def activation_from_filename(path: str) -> str | None:
     match = re.fullmatch(r"sweep_(.+)\.csv", os.path.basename(path))
     return match.group(1) if match else None
+
+
+def base_from_filename(path: str) -> tuple[str, str, str] | None:
+    """(activation, k, stride) of an extra_<activation>_k<K>_s<STRIDE>.csv file name."""
+    match = re.fullmatch(r"extra_(.+)_k(\d+)_s(\d+)\.csv", os.path.basename(path))
+    return match.groups() if match else None
+
+
+def extra_rows(rows: list[dict], activation: str, k: str, stride: str) -> dict[str, dict]:
+    """Label -> row for the experiments named x-<activation>-k<k>-s<stride>-<label> (the first one listed)."""
+    prefix = f"x-{activation}-k{k}-s{stride}-"
+    labeled = {}
+    for row in rows:
+        if row["Experiment"].startswith(prefix):
+            labeled.setdefault(row["Experiment"][len(prefix) :], row)
+    if "baseline" not in labeled:
+        raise ValueError(f"no {prefix}baseline experiment with {VAL}")
+    return labeled
+
+
+def beats_baseline(row: dict, base: dict) -> bool:
+    """Validation MAE lower than the baseline's by more than the baseline's seed std."""
+    return base[VAL] - row[VAL] > (base[VAL_STD] or 0.0)
+
+
+def main_extra(path: str, activation: str, k: str, stride: str) -> None:
+    rows = extra_rows(read_rows(path, EXTRA_COLUMNS), activation, k, stride)
+    base = rows["baseline"]
+
+    def fmt(value: float | None, signed: bool = False) -> str:
+        return "-" if value is None else f"{value:+.2f}" if signed else f"{value:.2f}"
+
+    print(f"base: activation={activation} k={k} stride={stride}  (* = val MAE below baseline by > its seed std)")
+    print(f"{'change':<14}{'val MAE':>15}{'d val':>8}{'test MAE':>10}{'d test':>8}")
+    for label, r in sorted(rows.items(), key=lambda item: item[1][VAL]):
+        val = f"{r[VAL]:.2f} +/- {fmt(r[VAL_STD])}"
+        d_test = None if r[TEST] is None or base[TEST] is None else r[TEST] - base[TEST]
+        star = " *" if label != "baseline" and beats_baseline(r, base) else ""
+        print(f"{label:<14}{val:>15}{fmt(r[VAL] - base[VAL], True):>8}{fmt(r[TEST]):>10}{fmt(d_test, True):>8}{star}")
+    label, best = min(rows.items(), key=lambda item: item[1][VAL])
+    print(f"\nselected by validation: {label} (val MAE {best[VAL]:.2f})")
+    if best[TEST] is None:
+        print("no test MAE for the selected change")
+    else:
+        print(f"test MAE {best[TEST]:.2f} vs paper {PAPER_MAE}: {verdict(best[TEST])}")
 
 
 def main(path: str, activation: str) -> None:
@@ -111,9 +163,16 @@ def main(path: str, activation: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("csv", help="sweep_<activation>.csv")
+    parser.add_argument("csv", help="sweep_<activation>.csv or extra_<activation>_k<K>_s<STRIDE>.csv")
     parser.add_argument("--activation", help="default: taken from the csv file name")
     args = parser.parse_args()
+    extra = base_from_filename(args.csv)
+    if extra is not None:
+        try:
+            main_extra(args.csv, *extra)
+        except ValueError as e:
+            sys.exit(str(e))
+        sys.exit(0)
     activation = args.activation or activation_from_filename(args.csv)
     if activation is None:
         parser.error("pass --activation (the file name is not sweep_<activation>.csv)")

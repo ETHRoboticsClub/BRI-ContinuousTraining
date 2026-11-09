@@ -24,6 +24,7 @@ scripts/
   build_dataset.py     download EMG-FK, preprocess, save whole recordings to data/processed/emg_fk
   train.py             load data, load model, train -> output/
   sweep.sh             k x example_stride sweep as DVC experiments, one activation
+  sweep_extra.sh       augmentation / normalization / SSM regularization changes, one at a time, on one base
   summarize_sweep.py   pick the configuration with the lowest validation MAE, compare test MAE with the paper
 src/
   params.yaml          preprocessing and training parameters
@@ -92,6 +93,25 @@ python scripts/summarize_sweep.py sweep_tanh.csv
 The summary lists val and test MAE of every configuration and selects the one with the lowest **validation** MAE
 (test is never used for selection). Verdict on its test MAE against the paper's 16.71 degrees: `success` below
 16.71, `threshold` up to 17.21, otherwise `miss`.
+
+### Extra experiments
+
+`scripts/sweep_extra.sh tanh|relu K STRIDE` runs 11 experiments on one base configuration: a baseline rerun and
+one experiment per change (`aug_gain=0.2`, `aug_rotate=1`, `aug_shift=0.5`, `normalization=set`, `downsample=2`
+and `5`, `ssm_speed=1` and `0.25`, `ssm_lr_scale=0.1`, `ssm_decay_A=false`). Each is a DVC experiment named
+`x-<activation>-k<K>-s<STRIDE>-<change>`. `BASE_SETS="key=value ..."` adds base overrides to every run (it refuses
+keys that a change sets); `DRY_RUN=1` only prints the commands. Remove old runs with `dvc exp remove` before
+rerunning the same base.
+
+```bash
+sky exec hri-gpu sky/train.yaml --env EXTRA="tanh 5 40" --env BASE_SETS=""
+rsync -av hri-gpu:sky_workdir/extra_tanh_k5_s40.csv .
+python scripts/summarize_sweep.py extra_tanh_k5_s40.csv
+```
+
+The summary prints each change's val MAE (mean ± seed std) and test MAE with their differences from the baseline,
+marks the changes whose val MAE is below the baseline's by more than its seed std, and selects the change with the
+lowest **validation** MAE.
 
 ## Data versioning
 
