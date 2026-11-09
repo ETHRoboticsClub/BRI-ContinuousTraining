@@ -287,7 +287,10 @@ Add a `pytest` step to `.github/workflows/ci.yml` (CI currently only lints).
   MetaTF's Akida models use ReLU, and Tanh support on Akida is unconfirmed.
 - **No bias.** Without biases or BatchNorm, the model must learn the targets' mean offset through its
   weights. MetaTF supplies offsets through BatchNorm. If accuracy suffers, this is the second suspect after the
-  learning rate.
+  learning rate. The training targets average about 145° (per-joint 115–164°), so a bias-free model starts about
+  145° off; the GRU baseline initialised its head bias to the mean target. Decision (2026-11-09): run as is first
+  (no offset). If the 3-seed mean test MAE misses the threshold (> 17.21°), add the per-joint training-mean angle
+  to the output as a fixed, non-trainable constant (no trainable bias) and rerun.
 - **Front end on the host.** `TangentSpace` (eigendecomposition, matrix log) cannot run on Akida; it stays on
   the host.
 - **Stateful equivalence (later work).** When stateful inference is added, test that streaming in chunks of the stateful
