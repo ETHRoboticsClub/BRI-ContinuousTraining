@@ -50,13 +50,13 @@ def test_main_runs_from_start_label_and_skips_finished(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(local, "run", fake_run(calls))
     monkeypatch.setattr(local, "load_train_params", lambda: dict(BASE))
-    main(["relu", "10", "40", "--start", "aug_gain", "--out", str(tmp_path)])
+    main(["relu", "10", "40", "--start", CHANGES[1][0], "--out", str(tmp_path)])
     assert [c[0] for c in calls] == [label for label, _ in CHANGES[1:]]
     assert all(resume for _, _, resume in calls)
     assert json.loads((tmp_path / "base_params.json").read_text())["k"] == 10
     assert json.loads((tmp_path / "aug_gain/params.json").read_text())["aug_gain"] == 0.2
     calls.clear()
-    main(["relu", "10", "40", "--start", "aug_gain", "--out", str(tmp_path)])
+    main(["relu", "10", "40", "--start", CHANGES[1][0], "--out", str(tmp_path)])
     assert calls == []  # every experiment finished: nothing reruns
 
 
@@ -85,3 +85,19 @@ def test_unknown_start_label_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(local, "load_train_params", lambda: dict(BASE))
     with pytest.raises(SystemExit):
         main(["relu", "10", "40", "--start", "aug_gian", "--out", str(tmp_path)])
+
+
+def test_order_is_regularization_then_normalization_then_augmentation():
+    assert [label for label, _ in CHANGES] == [
+        "baseline",
+        "downsample_2",
+        "downsample_4",
+        "speed_1",
+        "speed_0p25",
+        "ssm_lr_0p1",
+        "no_decay_a",
+        "norm_set",
+        "aug_gain",
+        "aug_rotate",
+        "aug_shift",
+    ]

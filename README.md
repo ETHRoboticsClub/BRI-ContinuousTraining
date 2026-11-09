@@ -98,8 +98,9 @@ The summary lists val and test MAE of every configuration and selects the one wi
 ### Extra experiments
 
 `scripts/sweep_extra.sh tanh|relu K STRIDE` runs 11 experiments on one base configuration: a baseline rerun and
-one experiment per change (`aug_gain=0.2`, `aug_rotate=1`, `aug_shift=0.5`, `normalization=set`, `downsample=2`
-and `4`, `ssm_speed=1` and `0.25`, `ssm_lr_scale=0.1`, `ssm_decay_A=false`). Each is a DVC experiment named
+one experiment per change, in this order: SSM regularization (`downsample=2` and `4`, `ssm_speed=1` and `0.25`,
+`ssm_lr_scale=0.1`, `ssm_decay_A=false`), normalization (`normalization=set`), then augmentation (`aug_gain=0.2`,
+`aug_rotate=1`, `aug_shift=0.5`). Each is a DVC experiment named
 `x-<activation>-k<K>-s<STRIDE>-<change>`. `BASE_SETS="key=value ..."` adds base overrides to every run (it refuses
 keys that a change sets); `DRY_RUN=1` only prints the commands. Remove old runs with `dvc exp remove` before
 rerunning the same base.
@@ -110,7 +111,7 @@ rsync -av hri-gpu:sky_workdir/extra_tanh_k5_s40.csv .
 python scripts/summarize_sweep.py extra_tanh_k5_s40.csv
 ```
 
-On a laptop without DVC, `python -m scripts.sweep_extra_local relu 10 40 [--start aug_gain]` runs the same 11
+On a laptop without DVC, `python -m scripts.sweep_extra_local relu 10 40 [--start downsample_2]` runs the same 11
 experiments (from `--start` on) into `output/extra_<activation>_k<K>_s<STRIDE>/<change>/`. Rerunning the same
 command resumes: finished experiments and finished seeds are skipped, so a shutdown costs at most the seed in
 progress. While it runs, Windows does not sleep on idle (closing the lid or shutting down still stops it).

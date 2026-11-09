@@ -19,19 +19,19 @@ activation="$1"
 k="$2"
 stride="$3"
 
-# "label:change"
+# "label:change": SSM regularization, then normalization, then augmentation
 changes=(
   "baseline:"
-  "aug_gain:aug_gain=0.2"
-  "aug_rotate:aug_rotate=1"
-  "aug_shift:aug_shift=0.5"
-  "norm_set:normalization=set"
   "downsample_2:downsample=2"
   "downsample_4:downsample=4"
   "speed_1:ssm_speed=1"
   "speed_0p25:ssm_speed=0.25"
   "ssm_lr_0p1:ssm_lr_scale=0.1"
   "no_decay_a:ssm_decay_A=false"
+  "norm_set:normalization=set"
+  "aug_gain:aug_gain=0.2"
+  "aug_rotate:aug_rotate=1"
+  "aug_shift:aug_shift=0.5"
 )
 reserved="activation k example_stride aug_gain aug_rotate aug_shift normalization downsample ssm_speed ssm_lr_scale ssm_decay_A"
 
