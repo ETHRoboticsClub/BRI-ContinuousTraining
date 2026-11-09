@@ -21,6 +21,7 @@ class SSMEncoder(nn.Module):
 
     `downsample` s keeps every s-th tangent step of ssm1's output (MetaTF's Stride: x[:, s-1::s]), so ssm2 sees
     length / s steps and the last tangent step is kept. s must divide length and leave ssm2 at least 2 steps.
+    `speed` is both Kernelized layers' `speed`: it scales their initial dt (dt stays trainable).
     """
 
     def __init__(
@@ -32,14 +33,15 @@ class SSMEncoder(nn.Module):
         units=(256, 128),
         dropout=0.1,
         downsample: int = 1,
+        speed: float = 4,
     ):
         super().__init__()
         if downsample < 1 or length % downsample or length // downsample < 2:
             raise ValueError(f"downsample {downsample} must divide length {length} and leave at least 2 steps")
         self.downsample = downsample
         self.proj = KernelizedLinear(in_dim, dense)
-        self.ssm1 = Kernelized(dense, units[0], length)
-        self.ssm2 = Kernelized(units[0], units[1], length // downsample)
+        self.ssm1 = Kernelized(dense, units[0], length, speed=speed)
+        self.ssm2 = Kernelized(units[0], units[1], length // downsample, speed=speed)
         self.act1, self.act2, self.act3 = (make_activation(activation) for _ in range(3))
         self.dropout = nn.Dropout(dropout)
         self.out_dim = units[1]

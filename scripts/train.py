@@ -62,7 +62,12 @@ def run(params: dict, data_dir: Path, out_dir: Path) -> dict:
 
         # Build model and optimization
         model = Model(
-            train_set.channels, train_set.targets, length, params["activation"], downsample=params["downsample"]
+            train_set.channels,
+            train_set.targets,
+            length,
+            params["activation"],
+            downsample=params["downsample"],
+            ssm_speed=params["ssm_speed"],
         ).to(device)
         loss_fn = nn.HuberLoss()
         optimizer = torch.optim.AdamW(model.parameters(), lr=params["lr"], weight_decay=params["weight_decay"])

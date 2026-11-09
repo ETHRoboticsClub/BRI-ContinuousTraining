@@ -20,11 +20,14 @@ class Model(nn.Module):
         activation: str = "tanh",
         hidden: int = 64,
         downsample: int = 1,
+        ssm_speed: float = 4,
     ) -> None:
         super().__init__()
         self.length = length
         self.tangent_space = TangentSpace(channels)
-        self.encoder = SSMEncoder(self.tangent_space.out_dim, length, activation, downsample=downsample)
+        self.encoder = SSMEncoder(
+            self.tangent_space.out_dim, length, activation, downsample=downsample, speed=ssm_speed
+        )
         self.head = nn.Sequential(
             KernelizedLinear(self.encoder.out_dim, hidden),
             make_activation(activation),

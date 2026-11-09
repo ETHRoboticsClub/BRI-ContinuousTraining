@@ -73,6 +73,8 @@ EXTRA_CHANGES = [
     {"aug_shift": 0.5},
     {"downsample": 2},
     {"downsample": 5},
+    {"ssm_speed": 1},
+    {"ssm_speed": 0.25},
 ]
 
 

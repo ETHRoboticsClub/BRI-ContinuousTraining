@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 from torch import nn
@@ -84,3 +86,18 @@ def test_downsample_1_is_baseline():
     for (na, pa), (nb, pb) in zip(a.state_dict().items(), b.state_dict().items(), strict=True):
         assert na == nb and torch.equal(pa, pb)
     torch.testing.assert_close(a(x), b(x))
+
+
+@pytest.mark.parametrize("speed", [1, 0.25])
+def test_ssm_speed_shifts_log_dt(speed):
+    m, base = Model(8, 15, 50, ssm_speed=speed), Model(8, 15, 50)
+    for layer in ("ssm1", "ssm2"):
+        new, old = getattr(m.encoder, layer), getattr(base.encoder, layer)
+        torch.testing.assert_close(new.log_dt, old.log_dt + math.log(speed / 4))
+        torch.testing.assert_close(new.A, old.A)
+        torch.testing.assert_close(new.B, old.B)
+
+
+def test_nonpositive_speed_raises():
+    with pytest.raises(ValueError):
+        Model(8, 15, 10, ssm_speed=0)
