@@ -31,7 +31,7 @@ src/
   dataset.py           EMGFK: continuous recordings sliced into training examples (torch Dataset)
   model/
     tangent_space.py   TangentSpace: sub-window covariances in the Riemannian tangent space
-    kernelized.py      KernelizedLinear: linear state-space layer (kernel / stateful modes)
+    kernelized.py      zoh_discretize, Kernelized (diagonal complex SSM, FFT conv), KernelizedLinear
     ssm.py             SSMEncoder: projection + two Kernelized SSM layers, tanh or relu
     model.py           Model: TangentSpace -> SSMEncoder -> dense head, no biases
 sky/                   train on a GPU machine with SkyPilot
@@ -70,6 +70,7 @@ or without DVC: `python scripts/build_dataset.py` then `python scripts/train.py`
 
 `scripts/sweep.sh tanh|relu` builds the dataset, then runs one `dvc exp run` per configuration (k=1 with stride
 40, 120, 240; k=5 with stride 40, 240, 520, 1040) and writes `sweep_<activation>.csv` (`dvc exp show --csv`).
+It does not push experiment refs unless `PUSH_EXPERIMENTS=1` is set.
 On the GPU machine:
 
 ```bash

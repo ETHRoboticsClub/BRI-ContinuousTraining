@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # k x example_stride sweep as DVC experiments, for one activation.
 # Usage: scripts/sweep.sh tanh|relu    -> sweep_<activation>.csv (summarize with scripts/summarize_sweep.py)
+# Set PUSH_EXPERIMENTS=1 to also run `dvc exp push` to the git remote (default: off).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -22,12 +23,12 @@ configs=(
 for config in "${configs[@]}"; do
   read -r k stride <<< "$config"
   dvc exp run \
-    -S "train.activation=$activation" \
-    -S "train.k=$k" \
-    -S "train.example_stride=$stride"
+    -S "src/params.yaml:train.activation=$activation" \
+    -S "src/params.yaml:train.k=$k" \
+    -S "src/params.yaml:train.example_stride=$stride"
 done
 
-if [ -n "$(git remote)" ]; then
+if [ "${PUSH_EXPERIMENTS:-0}" = "1" ] && [ -n "$(git remote)" ]; then
   dvc exp push "$(git remote | head -n 1)" || echo "dvc exp push failed, continuing" >&2
 fi
 dvc exp show --csv > "sweep_${activation}.csv"

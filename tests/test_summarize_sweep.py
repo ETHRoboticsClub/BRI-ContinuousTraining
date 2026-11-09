@@ -68,3 +68,23 @@ def test_column_match_is_exact(tmp_path):
     path.write_text(HEADER.replace("train.k", "xtrain.k") + "\n")
     with pytest.raises(ValueError, match="train.k"):
         read_rows(str(path))
+
+
+def test_dvc_367_header_without_file_prefix(tmp_path):
+    header = (
+        "Experiment,rev,typ,Created,parent,State,Executor,kernel_length,example_length,"
+        "val.mae.mean,val.mae.std,test.mae.mean,test.mae.std,"
+        "train.k,train.example_stride,train.activation"
+    )
+    lines = [
+        "workspace,abc,baseline,-,-,-,-,!,!,!,!,!,!,5,40,relu",
+        "e1,r1,branch_commit,-,-,Success,-,100,200,17.0,0.1,17.5,0.1,1,40,relu",
+        "e2,r2,branch_commit,-,-,Success,-,100,200,16.0,0.1,16.4,0.1,5,240,relu",
+        "e3,r3,branch_commit,-,-,Success,-,100,200,10.0,0.1,11.0,0.1,1,40,tanh",
+        "e4,r4,baseline,-,-,-,-,,,,,,,5,40,relu",
+    ]
+    path = tmp_path / "sweep_relu.csv"
+    path.write_text("\n".join([header, *lines]) + "\n")
+    rows = for_activation(read_rows(str(path)), "relu")
+    assert [r["train.k"] for r in rows] == ["1", "5"]
+    assert select(rows)["test.mae.mean"] == 16.4

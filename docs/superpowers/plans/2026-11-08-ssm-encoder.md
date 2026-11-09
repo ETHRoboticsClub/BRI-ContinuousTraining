@@ -521,7 +521,7 @@ git commit -m "feat: seed loop, kernel-length cap, fixed eval stride, aggregate 
 - Modify: `README.md` (how to run and fetch a sweep)
 
 **Interfaces:**
-- `scripts/sweep.sh ACTIVATION`: runs `dvc pull --allow-missing`, `dvc repro build_dataset` and `dvc push`, then one `dvc exp run -S train.activation=$1 -S train.k=$k -S train.example_stride=$s` per configuration: k=1 with strides 40, 120, 240; k=5 with strides 40, 240, 520, 1040. Finally it runs `dvc exp push` if a git remote exists and writes `dvc exp show --csv > sweep_$1.csv`.
+- `scripts/sweep.sh ACTIVATION`: runs `dvc pull --allow-missing`, `dvc repro build_dataset` and `dvc push`, then one `dvc exp run -S src/params.yaml:train.activation=$1 -S src/params.yaml:train.k=$k -S src/params.yaml:train.example_stride=$s` per configuration: k=1 with strides 40, 120, 240; k=5 with strides 40, 240, 520, 1040. Finally it runs `dvc exp push` only if `PUSH_EXPERIMENTS=1` and a git remote exists, and writes `dvc exp show --csv > sweep_$1.csv`.
 - `scripts/summarize_sweep.py`:
   - `select(rows: list[dict]) -> dict` returns the row with the lowest `val.mae.mean` (never looks at test).
   - `verdict(test_mae: float) -> str` returns `"success"` if < 16.71, `"threshold"` if ≤ 17.21, else `"miss"`.

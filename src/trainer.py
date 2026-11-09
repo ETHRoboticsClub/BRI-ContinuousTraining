@@ -46,8 +46,19 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, scheduler, epochs, 
         train_loss = train_epoch(model, train_loader, loss_fn, optimizer, device, grad_clip)
         scheduler.step()
         val = evaluate(model, val_loader, device)
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_mse": val["mse"], "val_r2": val["r2"]})
-        print(f"[{epoch:03d}] train loss {train_loss:.4f} | val mse {val['mse']:.4f} r2 {val['r2']:.4f}")
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_mse": val["mse"],
+                "val_r2": val["r2"],
+                "val_mae": val["mae"],
+            }
+        )
+        print(
+            f"[{epoch:03d}] train loss {train_loss:.4f} | "
+            f"val mse {val['mse']:.4f} r2 {val['r2']:.4f} mae {val['mae']:.4f}"
+        )
         if best is None or val["r2"] > best["r2"]:
             best = val
             torch.save(model.state_dict(), checkpoint)

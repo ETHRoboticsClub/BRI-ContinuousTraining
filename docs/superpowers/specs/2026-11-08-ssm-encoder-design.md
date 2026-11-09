@@ -200,7 +200,7 @@ example length / 2, training example length}, 3 seeds each. In raw samples:
 
 7 configurations × 3 seeds = 21 training runs per activation variant: all 21 with `tanh` first, then all 21
 with `relu` (42 in total). Sweep with DVC experiments
-(`dvc exp run -S train.k=… -S train.example_stride=…`). How to queue them on the SkyPilot machine is the
+(`dvc exp run -S src/params.yaml:train.k=… -S src/params.yaml:train.example_stride=…`). How to queue them on the SkyPilot machine is the
 builder's call.
 
 **Comparison target: the paper** (Colot et al., `docs/continuous_paper.pdf`). Cross-subject TRR on EMG-FK:
