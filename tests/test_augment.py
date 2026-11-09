@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.augment import Augment, channel_gain, rotate
+from src.augment import Augment, channel_gain, rotate, shift
 
 ZEROS = {"aug_gain": 0.0, "aug_rotate": 0, "aug_shift": 0.0}
 
@@ -76,3 +76,28 @@ def test_rotation_draws_cover_minus_R_to_R():
     x = torch.arange(8.0)[:, None]
     seen = {int(aug(x)[0, 0].item()) for _ in range(300)}  # channel 0 receives channel -r
     assert {(-v) % 8 for v in seen} == {0, 1, 7}
+
+
+def test_shift_integer_values_are_rotations():
+    x = torch.randn(8, 20)
+    torch.testing.assert_close(shift(x, 0), x)
+    torch.testing.assert_close(shift(x, 1), rotate(x, 1))
+    torch.testing.assert_close(shift(x, -1), rotate(x, -1))
+
+
+def test_shift_interpolates_neighbours():
+    x = torch.randn(8, 20)
+    torch.testing.assert_close(shift(x, 0.25), 0.75 * x + 0.25 * rotate(x, 1))
+    torch.testing.assert_close(shift(x, -0.5), 0.5 * x + 0.5 * rotate(x, -1))
+
+
+def test_shift_draws_stay_in_range():
+    aug = Augment(shift=0.5)
+    aug.manual_seed(0)
+    x = torch.tensor([0.0, 1, 0, 0, 0, 0, 0, 0])[:, None]  # a single 1 at ring position 1
+    us = []
+    for _ in range(300):
+        y = aug(x)[:, 0]
+        us.append((y * torch.tensor([0.0, 1, 2, 3, 4, 5, 6, -1])).sum().item() - 1)  # centre of mass - 1 = u
+    assert max(abs(u) for u in us) <= 0.5 + 1e-6
+    assert min(us) < -0.4 and max(us) > 0.4

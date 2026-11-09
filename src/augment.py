@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 # EMG channel indices in order around the armband. The paper (Colot et al., Section II-A) has the 8 electrodes evenly
@@ -12,6 +14,13 @@ def rotate(x: torch.Tensor, r: int, order=RING_ORDER) -> torch.Tensor:
     out = torch.empty_like(x)
     out[idx] = x[idx].roll(r, 0)
     return out
+
+
+def shift(x: torch.Tensor, u: float, order=RING_ORDER) -> torch.Tensor:
+    """Rotate x [8, T] by a fractional u electrodes around the ring, linearly interpolating between neighbours."""
+    r = math.floor(u)
+    f = u - r
+    return (1 - f) * rotate(x, r, order) + f * rotate(x, r + 1, order)
 
 
 def channel_gain(x: torch.Tensor, log_gain: torch.Tensor) -> torch.Tensor:
@@ -45,6 +54,8 @@ class Augment:
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         if self.rotate:
             x = rotate(x, int(torch.randint(-self.rotate, self.rotate + 1, (), generator=self.generator)))
+        if self.shift:
+            x = shift(x, self.shift * (2 * torch.rand((), generator=self.generator).item() - 1))
         if self.gain:
             x = channel_gain(x, self.gain * torch.randn(x.shape[0], generator=self.generator))
         return x
