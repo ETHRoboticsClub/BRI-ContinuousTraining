@@ -1,11 +1,15 @@
-"""Summarize a sweep: python scripts/summarize_sweep.py sweep_tanh.csv
+"""Summarize a sweep: python scripts/summarize_sweep.py sweep_tanh.csv [--activation tanh]
 
 Reads the CSV written by `dvc exp show --csv`, prints every configuration's validation and test MAE,
 selects the configuration with the lowest validation MAE (test is never used for selection) and
 gives the verdict against the paper's cross-subject test MAE of 16.71 degrees.
 """
 
+import argparse
 import csv
+import math
+import os
+import re
 import sys
 
 PAPER_MAE = 16.71
@@ -13,6 +17,7 @@ TOLERANCE = 0.5  # degrees above the paper that still counts as a threshold resu
 
 VAL = "val.mae.mean"
 TEST = "test.mae.mean"
+EXPECTED_CONFIGS = 7  # k=1 with 3 strides, k=5 with 4 strides
 COLUMNS = (VAL, TEST, "train.k", "train.example_stride", "train.activation")
 
 
@@ -30,24 +35,34 @@ def verdict(test_mae: float) -> str:
 
 
 def _number(value: str) -> float | None:
+    """Float, or None when missing or not finite."""
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
+
+
+def _column(header: list[str], name: str) -> str | None:
+    """Header equal to `name` or ending with ':' + name (dvc prefixes columns with the file path)."""
+    return next((h for h in header if h == name or h.endswith(":" + name)), None)
 
 
 def read_rows(path: str) -> list[dict]:
-    """Rows with the canonical column names; dvc prefixes columns with the file path, so match by suffix.
+    """Rows with the canonical column names, all activations.
 
-    Rows without a validation MAE (baseline workspace row, failed experiments) are skipped.
+    Rows without a finite validation MAE (baseline workspace row, failed experiments) are skipped.
     """
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         header = reader.fieldnames or []
-        names = {c: next((h for h in header if h.endswith(c)), None) for c in COLUMNS}
+        names = {c: _column(header, c) for c in COLUMNS}
+        missing = [c for c, h in names.items() if h is None]
+        if missing:
+            raise ValueError(f"{path}: missing column(s) {', '.join(missing)}")
         rows = []
         for raw in reader:
-            row = {c: raw[h] if h else "" for c, h in names.items()}
+            row = {c: raw[h] for c, h in names.items()}
             for c in (VAL, TEST):
                 row[c] = _number(row[c])
             if row[VAL] is not None:
@@ -55,10 +70,30 @@ def read_rows(path: str) -> list[dict]:
     return rows
 
 
-def main(path: str) -> None:
-    rows = read_rows(path)
+def for_activation(rows: list[dict], activation: str) -> list[dict]:
+    """Rows of one activation, one per (k, example_stride) (the first one listed).
+
+    `dvc exp show` lists every experiment of the commit, so a relu sweep csv also holds the tanh runs.
+    """
+    seen = {}
+    for row in rows:
+        if row["train.activation"] == activation:
+            seen.setdefault((row["train.k"], row["train.example_stride"]), row)
+    return list(seen.values())
+
+
+def activation_from_filename(path: str) -> str | None:
+    match = re.fullmatch(r"sweep_(.+)\.csv", os.path.basename(path))
+    return match.group(1) if match else None
+
+
+def main(path: str, activation: str) -> None:
+    rows = for_activation(read_rows(path), activation)
     if not rows:
-        sys.exit(f"no experiment with {VAL} in {path}")
+        sys.exit(f"no {activation} experiment with {VAL} in {path}")
+    if len(rows) < EXPECTED_CONFIGS:
+        print(f"warning: {len(rows)} of {EXPECTED_CONFIGS} configurations found")
+        print()
     print(f"{'activation':<11}{'k':>3}{'stride':>8}{'val MAE':>10}{'test MAE':>10}")
     for r in sorted(rows, key=lambda r: r[VAL]):
         test = "-" if r[TEST] is None else f"{r[TEST]:.2f}"
@@ -75,6 +110,14 @@ def main(path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: python scripts/summarize_sweep.py sweep_<activation>.csv")
-    main(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("csv", help="sweep_<activation>.csv")
+    parser.add_argument("--activation", help="default: taken from the csv file name")
+    args = parser.parse_args()
+    activation = args.activation or activation_from_filename(args.csv)
+    if activation is None:
+        parser.error("pass --activation (the file name is not sweep_<activation>.csv)")
+    try:
+        main(args.csv, activation)
+    except ValueError as e:
+        sys.exit(str(e))
