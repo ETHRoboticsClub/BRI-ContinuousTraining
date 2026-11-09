@@ -15,7 +15,10 @@ SKIP_START = 0.25
 
 
 def main(params, raw_dir, out_dir) -> None:
-    """Download the recordings into raw_dir, preprocess them and save each whole recording to out_dir."""
+    """Download the recordings into raw_dir, preprocess them and save each whole recording to out_dir.
+
+    The EMG is saved filtered but not normalized: `EMGFK` z-scores it at load time.
+    """
     raw_dir, out_dir = Path(raw_dir), Path(out_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -39,7 +42,6 @@ def main(params, raw_dir, out_dir) -> None:
         emg = preprocess(emg)
         skip = int(SKIP_START * preprocess.fs)
         emg, angles = emg[:, skip:], angles[:, skip:]
-        emg = (emg - emg.mean(1, keepdims=True)) / (emg.std(1, keepdims=True) + 1e-6)
 
         save_recording(recording_path(out_dir, s), emg, angles)
         print(f"Subject {s:02d}: T = {emg.shape[1]} raw samples")

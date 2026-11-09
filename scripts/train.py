@@ -23,10 +23,13 @@ def load_data(params, data_dir, length):
     held_out = params["val_subjects"] + params["test_subjects"]
     recorded = [s for s in range(1, 100) if recording_path(data_dir, s).exists()]
     train_subjects = [s for s in recorded if s not in held_out]
-    train_set = EMGFK(data_dir, train_subjects, length, params["example_stride"])
+    norm = params["normalization"]
+    train_set = EMGFK(data_dir, train_subjects, length, params["example_stride"], norm)
     train_loader = DataLoader(train_set, params["batch_size"], shuffle=True, drop_last=True)
-    val_loader = DataLoader(EMGFK(data_dir, params["val_subjects"], length, EVAL_STRIDE), params["batch_size"])
-    test_loader = DataLoader(EMGFK(data_dir, params["test_subjects"], length, EVAL_STRIDE), params["batch_size"])
+    val_set = EMGFK(data_dir, params["val_subjects"], length, EVAL_STRIDE, norm)
+    test_set = EMGFK(data_dir, params["test_subjects"], length, EVAL_STRIDE, norm)
+    val_loader = DataLoader(val_set, params["batch_size"])
+    test_loader = DataLoader(test_set, params["batch_size"])
     return train_set, train_loader, val_loader, test_loader
 
 

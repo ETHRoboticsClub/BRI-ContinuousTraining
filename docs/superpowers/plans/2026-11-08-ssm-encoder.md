@@ -701,9 +701,9 @@ def test_warmup_cosine_matches_metatf():
         opt.step()
         sched.step()
     assert per_batch
-    assert lrs[0] == pytest.approx(1e-5)   # MetaTF: max(0, floor)
-    assert lrs[1] == pytest.approx(5e-4)   # halfway through warmup
-    assert lrs[2] == pytest.approx(1e-3)   # peak at the end of warmup
+    assert lrs[0] == pytest.approx(1e-5)  # MetaTF: max(0, floor)
+    assert lrs[1] == pytest.approx(5e-4)  # halfway through warmup
+    assert lrs[2] == pytest.approx(1e-3)  # peak at the end of warmup
     assert lrs[19] == pytest.approx(1e-5)  # cosine tail clipped to the floor
     assert all(a >= b for a, b in zip(lrs[2:], lrs[3:]))
 

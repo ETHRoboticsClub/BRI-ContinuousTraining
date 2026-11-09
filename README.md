@@ -44,7 +44,8 @@ Layer sizes are defined in the model classes. Preprocessing and training paramet
 The encoder is two SSM layers trained in kernel (convolutional) mode, the tangent-space covariances being the
 input sequence. The model has no biases. `activation` selects `tanh` or `relu`.
 
-The dataset stores each subject's whole recording (`subject_XX.npz`: `emg` [8, T], `angles` [15, T], 200 Hz).
+The dataset stores each subject's whole recording (`subject_XX.npz`: `emg` [8, T], `angles` [15, T], 200 Hz). The
+EMG is stored filtered but not normalized; `EMGFK` z-scores each channel when it loads the recordings.
 A training example is `raw_length(kernel_length)` raw samples of EMG ending at sample e, with the angles at e as
 target. Train examples are `example_stride` raw samples apart; validation and test examples are always 40 apart.
 
@@ -53,6 +54,7 @@ target. Train examples are `example_stride` raw samples apart; validation and te
 | `k` | Kernel-training example = `k` stateful inputs (240 samples each), capped by the shortest recording (over all subjects) |
 | `example_stride` | Raw samples between consecutive training examples |
 | `activation` | `tanh` or `relu` |
+| `normalization` | EMG z-score per channel: `subject` (each recording on its own statistics), `set` (statistics pooled over the recordings of each split, so only training changes: validation and test are one subject each) or `none` |
 | `seeds` | One model is trained per seed; metrics are reported as mean and sample std over seeds |
 
 ## Run

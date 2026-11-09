@@ -10,6 +10,7 @@ train:
   k: 5                    # kernel-training example = k stateful inputs (capped by the shortest recording)
   example_stride: 40      # raw samples between training examples
   activation: tanh        # tanh or relu
+  normalization: subject  # EMG z-score: none, subject or set (pooled over each set's subjects)
   batch_size: 256
   lr: 0.0002
   weight_decay: 0.0001

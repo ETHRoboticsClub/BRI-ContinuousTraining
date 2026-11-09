@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 import yaml
 
 from scripts.train import load_data, run
@@ -22,12 +23,13 @@ PARAMS = {
 
 @pytest.fixture
 def data_dir(tmp_path):
-    """Synthetic recordings for subjects 1-4, 3000 raw samples each."""
+    """Synthetic recordings for subjects 1-4, 3000 raw samples each, subject s with EMG std s."""
     d = tmp_path / "data"
     d.mkdir()
     for s in range(1, 5):
         rng = np.random.default_rng(s)
-        save_recording(recording_path(d, s), rng.standard_normal((8, 3000)), rng.standard_normal((15, 3000)))
+        emg = s * rng.standard_normal((8, 3000))  # subjects differ in scale, so pooled and per-subject stats differ
+        save_recording(recording_path(d, s), emg, rng.standard_normal((15, 3000)))
     return d
 
 
@@ -49,3 +51,10 @@ def test_eval_sets_use_stride_40(data_dir):
     _, _, val_loader, test_loader = load_data({**PARAMS, "example_stride": 1040}, data_dir, 240)
     assert len(val_loader.dataset) == (3000 - 240) // 40 + 1
     assert len(test_loader.dataset) == (3000 - 240) // 40 + 1
+
+
+def test_set_normalization_changes_training_only(data_dir):
+    sets = {n: load_data({**PARAMS, "normalization": n}, data_dir, 240) for n in ("subject", "set")}
+    for loader in (2, 3):  # val, test: one subject each, so pooled == per-subject
+        assert torch.equal(sets["subject"][loader].dataset[0][0], sets["set"][loader].dataset[0][0])
+    assert not torch.equal(sets["subject"][0][0][0], sets["set"][0][0][0])
