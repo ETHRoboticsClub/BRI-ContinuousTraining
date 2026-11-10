@@ -1,18 +1,21 @@
+import argparse
 import json
-import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
-from src.augment import Augment
-from src.dataset import EMGFK, kernel_length, recording_path, shortest_recording
-from src.model.model import Model
-from src.model.tangent_space import raw_length
-from src.trainer import evaluate, fit, param_groups, save_history
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.build_dataset import INTRASUBJECT_BANDS, extract_intrasubject_dataset  # noqa: E402
+from src.model.model import Model  # noqa: E402
+from src.trainer import fit, save_history  # noqa: E402
 
 DATA_DIR = Path("data/processed/emg_fk")
 OUT_DIR = Path("output")
@@ -20,111 +23,120 @@ EVAL_STRIDE = 40  # raw samples between validation / test examples
 METRICS = ("mse", "r2", "nmse", "mae")
 
 
-def load_data(params, data_dir, length):
-    """Cross-subject split: val/test subjects are held out, every other recorded subject is used for training.
+def train_from_recording(
+    data_path: Path,
+    out_ckpt: Path,
+    epochs: int = 45,
+    batch_size: int = 64,
+    lr: float = 5e-4,
+) -> dict[str, float]:
+    """Extract features from an intra-subject .npz recording, train the GRU decoder, and save checkpoint."""
+    torch.manual_seed(42)
+    np.random.seed(42)
 
-    Only the training set is augmented.
-    """
-    held_out = params["val_subjects"] + params["test_subjects"]
-    recorded = [s for s in range(1, 100) if recording_path(data_dir, s).exists()]
-    train_subjects = [s for s in recorded if s not in held_out]
-    norm = params["normalization"]
-    train_set = EMGFK(data_dir, train_subjects, length, params["example_stride"], norm, Augment.from_params(params))
-    train_loader = DataLoader(train_set, params["batch_size"], shuffle=True, drop_last=True)
-    val_set = EMGFK(data_dir, params["val_subjects"], length, EVAL_STRIDE, norm)
-    test_set = EMGFK(data_dir, params["test_subjects"], length, EVAL_STRIDE, norm)
-    val_loader = DataLoader(val_set, params["batch_size"])
-    test_loader = DataLoader(test_set, params["batch_size"])
-    return train_set, train_loader, val_loader, test_loader
-
-
-def aggregate(per_seed: list[dict]) -> dict:
-    """Mean and sample std (ddof=1) of each metric over seeds."""
-    return {
-        m: {"mean": float(np.mean(v)), "std": float(np.std(v, ddof=1)) if len(v) > 1 else 0.0}
-        for m in METRICS
-        for v in [[r[m] for r in per_seed]]
-    }
-
-
-def write_atomic(path: Path, text: str) -> None:
-    """Write through a synced temporary file and a rename, so a power cut never leaves a truncated file."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-def run(params: dict, data_dir: Path, out_dir: Path, resume: bool = False) -> dict:
-    """Train one model per seed, test each best checkpoint, write history.csv and metrics.json to out_dir.
-
-    Each finished seed is saved to seed_<n>/result.json. With resume, a seed whose result.json was made with the
-    same params is reused instead of retrained, so an interrupted run continues from its first unfinished seed.
-    """
-    data_dir, out_dir = Path(data_dir), Path(out_dir)
-    device = params["device"] if torch.cuda.is_available() else "cpu"
-    length = kernel_length(params["k"], shortest_recording(data_dir))
-    train_set, train_loader, val_loader, test_loader = load_data(params, data_dir, raw_length(length))
-    history, seeds = [], {}
-    for seed in params["seeds"]:
-        torch.manual_seed(seed)
-        if train_set.augment is not None:
-            train_set.augment.manual_seed(seed)
-        seed_dir = out_dir / f"seed_{seed}"
-        seed_dir.mkdir(parents=True, exist_ok=True)
-        result_path = seed_dir / "result.json"
-        if resume and result_path.exists():
-            saved = json.loads(result_path.read_text())
-            if saved["params"] == json.loads(json.dumps(params)):
-                print(f"seed {seed}: reusing the finished run in {result_path}")
-                history += saved["history"]
-                seeds[str(seed)] = {"val": saved["val"], "test": saved["test"]}
-                continue
-
-        # Build model and optimization
-        model = Model(
-            train_set.channels,
-            train_set.targets,
-            length,
-            params["activation"],
-            downsample=params["downsample"],
-            ssm_speed=params["ssm_speed"],
-        ).to(device)
-        loss_fn = nn.HuberLoss()
-        groups = param_groups(
-            model, params["lr"], params["weight_decay"], params["ssm_lr_scale"], params["ssm_decay_A"]
+    with np.load(data_path) as archive:
+        emg = archive["emg"].astype(np.float32)
+        targets = archive["targets"].astype(np.float32)
+        fs = int(archive["fs"]) if "fs" in archive else 200
+        session_lengths = (
+            archive["session_lengths"].astype(np.int64).tolist() if "session_lengths" in archive else [int(len(emg))]
         )
-        optimizer = torch.optim.AdamW(groups)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, params["epochs"])
 
-        # Train
-        seed_history, val = fit(
-            model, train_loader, val_loader, loss_fn, optimizer, scheduler,
-            params["epochs"], device, seed_dir / "best_model.pt", params["grad_clip"],
-        )  # fmt: skip
-        seed_history = [{"seed": seed, **row} for row in seed_history]
-        history += seed_history
+    sub_len, seq_len = 100, 10
+    ds = extract_intrasubject_dataset(
+        emg, targets, session_lengths=session_lengths, fs=fs, sub_len=sub_len, seq_len=seq_len
+    )
+    x_train_raw, y_train_deg = ds["X_train_raw"], ds["Y_train_deg"]
+    x_val_raw, y_val_deg = ds["X_val_raw"], ds["Y_val_deg"]
 
-        # Test the best checkpoint
-        model.load_state_dict(torch.load(seed_dir / "best_model.pt", map_location=device))
-        test = evaluate(model, test_loader, device)
-        print(f"seed {seed}: val mae {val['mae']:.2f} | test r2 {test['r2']:.4f} mae {test['mae']:.2f}")
-        seeds[str(seed)] = {"val": val, "test": test}
-        result = {"params": params, "val": val, "test": test, "history": seed_history}
-        write_atomic(result_path, json.dumps(result, indent=2))
+    f_mean = np.mean(x_train_raw, axis=(0, 1), keepdims=True).astype(np.float32)
+    f_std = np.maximum(np.std(x_train_raw, axis=(0, 1), keepdims=True), 0.05).astype(np.float32)
+    t_mean = np.mean(y_train_deg, axis=0).astype(np.float32)
+    t_std = np.maximum(np.std(y_train_deg, axis=0), 1.0).astype(np.float32)
 
-    metrics = {
-        "kernel_length": length,
-        "example_length": raw_length(length),
-        **{split: aggregate([r[split] for r in seeds.values()]) for split in ("val", "test")},
-        "seeds": seeds,
+    x_train = np.clip((x_train_raw - f_mean) / f_std, -4.0, 4.0)
+    y_train = (y_train_deg - t_mean) / t_std
+    x_val = np.clip((x_val_raw - f_mean) / f_std, -4.0, 4.0)
+    y_val = (y_val_deg - t_mean) / t_std
+
+    train_loader = DataLoader(
+        TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train)),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+    val_loader = DataLoader(
+        TensorDataset(torch.from_numpy(x_val), torch.from_numpy(y_val)),
+        batch_size=batch_size,
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = Model(channels=8, targets=15, hidden=64, in_features=int(x_train.shape[-1])).to(device)
+    loss_fn = nn.SmoothL1Loss(beta=0.25)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    extra = {
+        "feature_mean": f_mean,
+        "feature_std": f_std,
+        "target_mean": t_mean,
+        "target_std": t_std,
+        "channel_std": ds["channel_std"],
+        "inv_sqrt_mean_cov": ds["inv_sqrt_mean_cov"],
+        "intrasubject_calibrated": True,
+        "intrasubject_bands": INTRASUBJECT_BANDS,
+        "intrasubject_sub_len": sub_len,
+        "intrasubject_seq_len": seq_len,
+        "biomechanical_dip_coupling": True,
     }
-    save_history(history, out_dir / "history.csv")
-    write_atomic(out_dir / "metrics.json", json.dumps(metrics, indent=2))
-    return metrics
+
+    history, best = fit(
+        model,
+        train_loader,
+        val_loader,
+        loss_fn,
+        optimizer,
+        scheduler,
+        epochs,
+        device,
+        out_ckpt,
+        grad_clip=1.0,
+        target_mean=t_mean,
+        target_std=t_std,
+        checkpoint_extra=extra,
+    )
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    save_history(history, OUT_DIR / "history.csv")
+    (OUT_DIR / "metrics.json").write_text(json.dumps({"val": best}, indent=2))
+    return best
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train intra-subject TRR GRU decoder.")
+    parser.add_argument(
+        "--data",
+        type=Path,
+        default=REPO_ROOT / "data" / "recordings" / "myo_intrasubject.npz",
+        help="Path to recorded intra-subject .npz dataset.",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=OUT_DIR / "best_model.pt",
+        help="Output model checkpoint path.",
+    )
+    args = parser.parse_args()
+
+    with open(REPO_ROOT / "src" / "params.yaml", encoding="utf-8") as f:
+        params = yaml.safe_load(f)["train"]
+
+    train_from_recording(
+        data_path=args.data,
+        out_ckpt=args.out,
+        epochs=int(params["epochs"]),
+        batch_size=int(params["batch_size"]),
+        lr=float(params["lr"]),
+    )
 
 
 if __name__ == "__main__":
-    run(yaml.safe_load(open("src/params.yaml"))["train"], DATA_DIR, OUT_DIR)
+    main()
