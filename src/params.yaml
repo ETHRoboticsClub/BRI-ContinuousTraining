@@ -1,15 +1,20 @@
 preprocessing:
-  fs: 200                 # Hz, recordings are resampled to this rate
-  bandpass: [15, 95]      # Hz
-  notch: 50               # Hz
+  fs: 200
+  bandpass: [5, 95]
+  notch: 50
+  bands:
+    - [5, 40]
+    - [40, 70]
+    - [70, 95]
 
 train:
-  val_subjects: [19]
-  test_subjects: [20]
-  epochs: 15
-  batch_size: 256
-  lr: 0.0002
+  sub_len: 100
+  step: 20
+  seq_len: 10
+  epochs: 45
+  batch_size: 64
+  lr: 0.0005
   weight_decay: 0.0001
   grad_clip: 1.0
-  seed: 0
+  seed: 42
   device: cuda
