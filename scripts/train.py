@@ -1,130 +1,259 @@
+"""Train the 6-class ReactEMG masked multimodal Transformer classifier."""
+
+from __future__ import annotations
+
+import argparse
 import json
-import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
-from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
-from src.augment import Augment
-from src.dataset import EMGFK, kernel_length, recording_path, shortest_recording
-from src.model.model import Model
-from src.model.tangent_space import raw_length
-from src.trainer import evaluate, fit, param_groups, save_history
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-DATA_DIR = Path("data/processed/emg_fk")
-OUT_DIR = Path("output")
-EVAL_STRIDE = 40  # raw samples between validation / test examples
-METRICS = ("mse", "r2", "nmse", "mae")
+from src.dataset import LabeledUnlabeledSampler, ReactEMGDataset, discover_reactemg_files  # noqa: E402
+from src.model.model import Any2Any_Model  # noqa: E402
+from src.preprocess import Preprocess  # noqa: E402
+from src.trainer import ReactEMGTrainer, load_reactemg_checkpoint, resolve_device  # noqa: E402
 
 
-def load_data(params, data_dir, length):
-    """Cross-subject split: val/test subjects are held out, every other recorded subject is used for training.
-
-    Only the training set is augmented.
-    """
-    held_out = params["val_subjects"] + params["test_subjects"]
-    recorded = [s for s in range(1, 100) if recording_path(data_dir, s).exists()]
-    train_subjects = [s for s in recorded if s not in held_out]
-    norm = params["normalization"]
-    train_set = EMGFK(data_dir, train_subjects, length, params["example_stride"], norm, Augment.from_params(params))
-    train_loader = DataLoader(train_set, params["batch_size"], shuffle=True, drop_last=True)
-    val_set = EMGFK(data_dir, params["val_subjects"], length, EVAL_STRIDE, norm)
-    test_set = EMGFK(data_dir, params["test_subjects"], length, EVAL_STRIDE, norm)
-    val_loader = DataLoader(val_set, params["batch_size"])
-    test_loader = DataLoader(test_set, params["batch_size"])
-    return train_set, train_loader, val_loader, test_loader
+def _resolve_path(path_str: str | Path) -> Path:
+    p = Path(path_str)
+    return p if p.is_absolute() else (_REPO_ROOT / p)
 
 
-def aggregate(per_seed: list[dict]) -> dict:
-    """Mean and sample std (ddof=1) of each metric over seeds."""
-    return {
-        m: {"mean": float(np.mean(v)), "std": float(np.std(v, ddof=1)) if len(v) > 1 else 0.0}
-        for m in METRICS
-        for v in [[r[m] for r in per_seed]]
-    }
+def _set_seed(seed: int) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-def write_atomic(path: Path, text: str) -> None:
-    """Write through a synced temporary file and a rename, so a power cut never leaves a truncated file."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+def _load_splits(cfg: dict, seed: int, manifest_path: Path | None) -> dict[str, list[Path]]:
+    model_cfg = cfg.get("model", {})
+    train_cfg = cfg.get("train", {})
+
+    if manifest_path is not None and manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        splits = manifest.get("splits", {})
+        resolved = {k: [Path(p) for p in splits.get(k, []) if Path(p).exists()] for k in ("train", "val", "unlabeled")}
+        if resolved["train"]:
+            return resolved
+
+    data_root = _resolve_path(train_cfg.get("data_root", "data/raw/reactemg"))
+    return discover_reactemg_files(
+        data_root=data_root,
+        dataset_selection=str(train_cfg.get("dataset_selection", "pub_with_epn")),
+        num_classes=int(model_cfg.get("num_classes", 6)),
+        epn_subset_percentage=float(train_cfg.get("epn_subset_percentage", 1.0)),
+        val_split_ratio=float(train_cfg.get("val_split_ratio", 0.05)),
+        seed=seed,
+    )
 
 
-def run(params: dict, data_dir: Path, out_dir: Path, resume: bool = False) -> dict:
-    """Train one model per seed, test each best checkpoint, write history.csv and metrics.json to out_dir.
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train 6-class ReactEMG Any2Any_Model")
+    parser.add_argument("--config", type=Path, default=_REPO_ROOT / "src" / "params.yaml")
+    parser.add_argument(
+        "--manifest", type=Path, default=_REPO_ROOT / "data" / "processed" / "reactemg" / "manifest.json"
+    )
+    parser.add_argument("--output-dir", type=Path, default=_REPO_ROOT / "output")
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume from saved_checkpoint_pth or output/best_model.pt"
+    )
+    parser.add_argument("--skip-streaming-eval", action="store_true")
+    return parser.parse_args(argv)
 
-    Each finished seed is saved to seed_<n>/result.json. With resume, a seed whose result.json was made with the
-    same params is reused instead of retrained, so an interrupted run continues from its first unfinished seed.
-    """
-    data_dir, out_dir = Path(data_dir), Path(out_dir)
-    device = params["device"] if torch.cuda.is_available() else "cpu"
-    length = kernel_length(params["k"], shortest_recording(data_dir))
-    train_set, train_loader, val_loader, test_loader = load_data(params, data_dir, raw_length(length))
-    history, seeds = [], {}
-    for seed in params["seeds"]:
-        torch.manual_seed(seed)
-        if train_set.augment is not None:
-            train_set.augment.manual_seed(seed)
-        seed_dir = out_dir / f"seed_{seed}"
-        seed_dir.mkdir(parents=True, exist_ok=True)
-        result_path = seed_dir / "result.json"
-        if resume and result_path.exists():
-            saved = json.loads(result_path.read_text())
-            if saved["params"] == json.loads(json.dumps(params)):
-                print(f"seed {seed}: reusing the finished run in {result_path}")
-                history += saved["history"]
-                seeds[str(seed)] = {"val": saved["val"], "test": saved["test"]}
-                continue
 
-        # Build model and optimization
-        model = Model(
-            train_set.channels,
-            train_set.targets,
-            length,
-            params["activation"],
-            downsample=params["downsample"],
-            ssm_speed=params["ssm_speed"],
-        ).to(device)
-        loss_fn = nn.HuberLoss()
-        groups = param_groups(
-            model, params["lr"], params["weight_decay"], params["ssm_lr_scale"], params["ssm_decay_A"]
+def train_from_config(args: argparse.Namespace) -> Path:
+    """Execute training configured by params.yaml and CLI overrides."""
+    cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+    prep_cfg = cfg.get("preprocessing", {})
+    model_cfg = cfg.get("model", {})
+    train_cfg = cfg.get("train", {})
+    eval_cfg = cfg.get("eval", {})
+
+    seeds = [int(args.seed)] if args.seed is not None else [int(s) for s in train_cfg.get("seeds", [42])]
+    seed = seeds[0]
+    _set_seed(seed)
+
+    epochs = int(args.epochs) if args.epochs is not None else int(train_cfg.get("epochs", 12))
+    batch_size = int(args.batch_size) if args.batch_size is not None else int(train_cfg.get("batch_size", 128))
+    device = resolve_device(args.device if args.device is not None else str(train_cfg.get("device", "auto")))
+    output_dir = args.output_dir if args.output_dir.is_absolute() else (_REPO_ROOT / args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    splits = _load_splits(cfg, seed=seed, manifest_path=args.manifest)
+    if not splits["train"]:
+        raise RuntimeError(
+            f"No training files found under {_resolve_path(train_cfg.get('data_root', 'data/raw/reactemg'))}. "
+            "Run scripts/build_dataset.py first."
         )
-        optimizer = torch.optim.AdamW(groups)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, params["epochs"])
 
-        # Train
-        seed_history, val = fit(
-            model, train_loader, val_loader, loss_fn, optimizer, scheduler,
-            params["epochs"], device, seed_dir / "best_model.pt", params["grad_clip"],
-        )  # fmt: skip
-        seed_history = [{"seed": seed, **row} for row in seed_history]
-        history += seed_history
+    preprocess = Preprocess(
+        fs=int(prep_cfg.get("fs", 200)),
+        channels=int(prep_cfg.get("channels", 8)),
+        median_filter_size=int(prep_cfg.get("median_filter_size", 3)),
+        medfilt_order=str(prep_cfg.get("medfilt_order", "before_rec")),
+        scale_divisor=float(prep_cfg.get("scale_divisor", 128.0)),
+        hand_choice=str(prep_cfg.get("hand_choice", "right")),
+    )
 
-        # Test the best checkpoint
-        model.load_state_dict(torch.load(seed_dir / "best_model.pt", map_location=device))
-        test = evaluate(model, test_loader, device)
-        print(f"seed {seed}: val mae {val['mae']:.2f} | test r2 {test['r2']:.4f} mae {test['mae']:.2f}")
-        seeds[str(seed)] = {"val": val, "test": test}
-        result = {"params": params, "val": val, "test": test, "history": seed_history}
-        write_atomic(result_path, json.dumps(result, indent=2))
+    channels = int(prep_cfg.get("channels", 8))
+    num_classes = int(model_cfg.get("num_classes", 6))
+    window_size = int(model_cfg.get("window_size", 600))
+    task_selection = [int(t) for t in train_cfg.get("task_selection", [0, 1, 2])]
 
-    metrics = {
-        "kernel_length": length,
-        "example_length": raw_length(length),
-        **{split: aggregate([r[split] for r in seeds.values()]) for split in ("val", "test")},
-        "seeds": seeds,
-    }
-    save_history(history, out_dir / "history.csv")
-    write_atomic(out_dir / "metrics.json", json.dumps(metrics, indent=2))
-    return metrics
+    labeled_train_ds = ReactEMGDataset(
+        file_paths=splits["train"],
+        window_size=window_size,
+        stride=int(train_cfg.get("window_stride", 30)),
+        channels=channels,
+        num_classes=num_classes,
+        task_selection=[t for t in task_selection if t in (0, 1, 2)],
+        preprocess=preprocess,
+        mask_alignment=str(model_cfg.get("mask_alignment", "aligned")),
+        lambda_poisson=float(train_cfg.get("lambda_poisson", 7.0)),
+        sampling_probability_poisson=float(train_cfg.get("sampling_probability_poisson", 0.99)),
+        poisson_mask_range=tuple(train_cfg.get("poisson_mask_range", [0.3, 0.75])),
+        end_mask_range=tuple(train_cfg.get("end_mask_range", [0.3, 0.6])),
+        transition_buffer=int(train_cfg.get("transition_buffer", 30)),
+        noise=float(train_cfg.get("noise", 0.0)),
+        is_unlabeled=False,
+        deterministic=False,
+        seed=seed,
+    )
+
+    if 3 in task_selection and splits["unlabeled"]:
+        unlabeled_ds = ReactEMGDataset(
+            file_paths=splits["unlabeled"],
+            window_size=window_size,
+            stride=int(train_cfg.get("window_stride", 30)),
+            channels=channels,
+            num_classes=num_classes,
+            task_selection=(3,),
+            preprocess=preprocess,
+            mask_alignment=str(model_cfg.get("mask_alignment", "aligned")),
+            lambda_poisson=float(train_cfg.get("lambda_poisson", 7.0)),
+            poisson_mask_range=tuple(train_cfg.get("poisson_mask_range", [0.3, 0.75])),
+            is_unlabeled=True,
+            deterministic=False,
+            seed=seed,
+        )
+        if len(unlabeled_ds) > 0:
+            labeled_count = len(labeled_train_ds)
+            combined = ConcatDataset([labeled_train_ds, unlabeled_ds])
+            # Expose index lists matching ConcatDataset offsets for LabeledUnlabeledSampler
+            combined.labeled_indices = list(range(labeled_count))  # type: ignore[attr-defined]
+            combined.unlabeled_indices = list(range(labeled_count, labeled_count + len(unlabeled_ds)))  # type: ignore[attr-defined]
+            sampler = LabeledUnlabeledSampler(combined, seed=seed)  # type: ignore[arg-type]
+            train_loader = DataLoader(combined, batch_size=batch_size, sampler=sampler)
+        else:
+            train_loader = DataLoader(labeled_train_ds, batch_size=batch_size, shuffle=True)
+    else:
+        train_loader = DataLoader(labeled_train_ds, batch_size=batch_size, shuffle=True)
+
+    val_loader: DataLoader | None = None
+    if splits["val"]:
+        val_ds = ReactEMGDataset(
+            file_paths=splits["val"],
+            window_size=window_size,
+            stride=int(train_cfg.get("window_stride", 30)),
+            channels=channels,
+            num_classes=num_classes,
+            task_selection=(0,),
+            preprocess=preprocess,
+            mask_alignment=str(model_cfg.get("mask_alignment", "aligned")),
+            lambda_poisson=float(train_cfg.get("lambda_poisson", 7.0)),
+            sampling_probability_poisson=1.0,
+            poisson_mask_range=tuple(train_cfg.get("poisson_mask_range", [0.3, 0.75])),
+            is_unlabeled=False,
+            deterministic=True,
+            seed=seed,
+        )
+        if len(val_ds) > 0:
+            val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+
+    saved_ckpt = train_cfg.get("saved_checkpoint_pth")
+    if saved_ckpt is not None:
+        model, _ = load_reactemg_checkpoint(_resolve_path(saved_ckpt), device=device)
+    else:
+        model = Any2Any_Model(
+            embedding_dim=int(model_cfg.get("embedding_dim", 128)),
+            nhead=int(model_cfg.get("nhead", 4)),
+            dropout=float(model_cfg.get("dropout", 0.15)),
+            activation=str(model_cfg.get("activation", "gelu")),
+            num_layers=int(model_cfg.get("num_layers", 2)),
+            window_size=window_size,
+            embedding_method=str(model_cfg.get("embedding_method", "linear_projection")),
+            mask_alignment=str(model_cfg.get("mask_alignment", "aligned")),
+            share_pe=bool(model_cfg.get("share_pe", True)),
+            tie_weight=bool(model_cfg.get("tie_weight", False)),
+            use_input_layernorm=bool(model_cfg.get("use_input_layernorm", True)),
+            num_classes=num_classes,
+            output_reduction_method=str(model_cfg.get("output_reduction_method", "none")),
+            chunk_size=int(model_cfg.get("chunk_size", 0)),
+            channels=channels,
+        )
+
+    trainer = ReactEMGTrainer(
+        model=model,
+        lr=float(train_cfg.get("lr", 1e-4)),
+        weight_decay=float(train_cfg.get("weight_decay", 0.01)),
+        warmup_ratio=float(train_cfg.get("warmup_ratio", 0.05)),
+        lr_decay_method=str(train_cfg.get("lr_decay_method", "linear")),
+        grad_clip=float(train_cfg.get("grad_clip", 1.0)),
+        scale_emg_loss=int(train_cfg.get("scale_emg_loss", 0)),
+        device=device,
+    )
+
+    resume_path = output_dir / "best_model.pt" if args.resume and (output_dir / "best_model.pt").exists() else None
+    checkpoint_args = {**model_cfg, **prep_cfg, "channels": channels}
+
+    history = trainer.fit(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=epochs,
+        output_dir=output_dir,
+        checkpoint_args=checkpoint_args,
+        resume_from=resume_path,
+    )
+    print(f"Training complete ({len(history)} epochs on {device}). Best checkpoint: {output_dir / 'best_model.pt'}")
+
+    if not args.skip_streaming_eval and splits["val"]:
+        metrics = trainer.evaluate_streaming(
+            val_files=splits["val"],
+            preprocess=preprocess,
+            lookahead=int(eval_cfg.get("lookahead", 50)),
+            samples_between_prediction=int(eval_cfg.get("samples_between_prediction", 20)),
+            stride=int(eval_cfg.get("stride", 1)),
+            buffer_range=int(eval_cfg.get("buffer_range", 200)),
+            maj_vote_range=str(eval_cfg.get("maj_vote_range", "future")),
+            likelihood_format=str(eval_cfg.get("likelihood_format", "probs")),
+            weight_max_factor=float(eval_cfg.get("weight_max_factor", 1.5)),
+            weighting_method=str(eval_cfg.get("weighting_method", "equal")),
+            allow_relax=int(eval_cfg.get("allow_relax", 0)),
+            strict_transition=int(eval_cfg.get("strict_transition", 0)),
+            fs=int(prep_cfg.get("fs", 200)),
+        )
+        (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    return output_dir / "best_model.pt"
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    train_from_config(args)
 
 
 if __name__ == "__main__":
-    run(yaml.safe_load(open("src/params.yaml"))["train"], DATA_DIR, OUT_DIR)
+    main()

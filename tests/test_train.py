@@ -1,122 +1,144 @@
-import csv
+"""End-to-end synthetic CLI integration tests for build_dataset, train, and evaluate."""
+
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
-import numpy as np
-import pytest
-import torch
 import yaml
 
-from scripts.train import load_data, run
-from src.dataset import recording_path, save_recording
-
-PARAMS = {
-    **yaml.safe_load((Path(__file__).resolve().parent.parent / "src/params.yaml").read_text())["train"],
-    "val_subjects": [3],
-    "test_subjects": [4],
-    "epochs": 1,
-    "batch_size": 8,
-    "k": 1,
-    "seeds": [0, 1],
-    "device": "cpu",
-}
+from scripts import build_dataset, evaluate, train
 
 
-@pytest.fixture
-def data_dir(tmp_path):
-    """Synthetic recordings for subjects 1-4, 3000 raw samples each, subject s with EMG std s."""
-    d = tmp_path / "data"
-    d.mkdir()
-    for s in range(1, 5):
-        rng = np.random.default_rng(s)
-        emg = s * rng.standard_normal((8, 3000))  # subjects differ in scale, so pooled and per-subject stats differ
-        save_recording(recording_path(d, s), emg, rng.standard_normal((15, 3000)))
-    return d
+def test_end_to_end_synthetic_build_train_evaluate(tmp_path: Path) -> None:
+    data_root = tmp_path / "raw_reactemg"
+    manifest_dir = tmp_path / "processed_reactemg"
+    out_dir = tmp_path / "output"
+    cfg_path = tmp_path / "params.yaml"
 
+    cfg = {
+        "preprocessing": {
+            "fs": 200,
+            "channels": 8,
+            "median_filter_size": 3,
+            "medfilt_order": "before_rec",
+            "scale_divisor": 128.0,
+            "hand_choice": "right",
+        },
+        "model": {
+            "num_classes": 6,
+            "window_size": 60,
+            "embedding_dim": 32,
+            "nhead": 4,
+            "num_layers": 1,
+            "dropout": 0.1,
+            "activation": "gelu",
+            "embedding_method": "linear_projection",
+            "mask_alignment": "aligned",
+            "share_pe": True,
+            "tie_weight": False,
+            "use_input_layernorm": True,
+            "output_reduction_method": "none",
+            "chunk_size": 0,
+        },
+        "train": {
+            "data_root": str(data_root),
+            "dataset_selection": "pub_with_epn",
+            "epn_subset_percentage": 1.0,
+            "window_stride": 40,
+            "task_selection": [0, 1, 2],
+            "lambda_poisson": 7.0,
+            "sampling_probability_poisson": 0.99,
+            "poisson_mask_range": [0.3, 0.75],
+            "end_mask_range": [0.3, 0.6],
+            "transition_buffer": 10,
+            "scale_emg_loss": 0,
+            "noise": 0.0,
+            "batch_size": 8,
+            "epochs": 1,
+            "lr": 0.0005,
+            "weight_decay": 0.01,
+            "warmup_ratio": 0.05,
+            "lr_decay_method": "linear",
+            "grad_clip": 1.0,
+            "saved_checkpoint_pth": None,
+            "val_split_ratio": 0.34,
+            "seeds": [42],
+            "device": "cpu",
+        },
+        "eval": {
+            "buffer_range": 40,
+            "lookahead": 10,
+            "samples_between_prediction": 10,
+            "stride": 10,
+            "maj_vote_range": "future",
+            "likelihood_format": "probs",
+            "weight_max_factor": 1.5,
+            "weighting_method": "equal",
+            "allow_relax": 0,
+            "strict_transition": 0,
+        },
+    }
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
-def test_run_writes_aggregate_metrics(tmp_path, data_dir):
-    m = run(PARAMS, data_dir, tmp_path / "out")
-    assert m["kernel_length"] == 10 and m["example_length"] == 240
-    assert set(m["seeds"]) == {"0", "1"}
-    for split in ("val", "test"):
-        assert set(m[split]) == {"mse", "r2", "nmse", "mae"}
-        assert m[split]["mae"]["mean"] == pytest.approx(np.mean([m["seeds"][s][split]["mae"] for s in ("0", "1")]))
-        assert m[split]["mae"]["std"] == pytest.approx(
-            np.std([m["seeds"][s][split]["mae"] for s in ("0", "1")], ddof=1)
-        )
-    assert json.loads((tmp_path / "out/metrics.json").read_text()) == m
-    assert (tmp_path / "out/seed_0/best_model.pt").exists()
+    # 1. Build synthetic dataset + manifest
+    build_dataset.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--data-root",
+            str(data_root),
+            "--output-dir",
+            str(manifest_dir),
+            "--synthetic-smoke",
+        ]
+    )
+    manifest_file = manifest_dir / "manifest.json"
+    assert manifest_file.exists()
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert manifest["num_classes"] == 6
+    assert manifest["counts"]["train"] >= 2
+    assert manifest["counts"]["val"] >= 1
+    assert manifest["counts"]["unlabeled"] == 1
 
+    # 2. Train 1 epoch on synthetic manifest
+    train.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--manifest",
+            str(manifest_file),
+            "--output-dir",
+            str(out_dir),
+            "--epochs",
+            "1",
+            "--batch-size",
+            "8",
+            "--device",
+            "cpu",
+            "--skip-streaming-eval",
+        ]
+    )
+    ckpt_path = out_dir / "best_model.pt"
+    assert ckpt_path.exists()
+    assert (out_dir / "history.csv").exists()
 
-def test_eval_sets_use_stride_40(data_dir):
-    _, _, val_loader, test_loader = load_data({**PARAMS, "example_stride": 1040}, data_dir, 240)
-    assert len(val_loader.dataset) == (3000 - 240) // 40 + 1
-    assert len(test_loader.dataset) == (3000 - 240) // 40 + 1
-
-
-def test_set_normalization_changes_training_only(data_dir):
-    sets = {n: load_data({**PARAMS, "normalization": n}, data_dir, 240) for n in ("subject", "set")}
-    for loader in (2, 3):  # val, test: one subject each, so pooled == per-subject
-        assert torch.equal(sets["subject"][loader].dataset[0][0], sets["set"][loader].dataset[0][0])
-    assert not torch.equal(sets["subject"][0][0][0], sets["set"][0][0][0])
-
-
-def test_only_training_examples_are_augmented(data_dir):
-    train_set, _, val_loader, test_loader = load_data({**PARAMS, "aug_gain": 0.2}, data_dir, 240)
-    assert not torch.equal(train_set[0][0], train_set[0][0])
-    for ds in (val_loader.dataset, test_loader.dataset):
-        assert ds.augment is None and torch.equal(ds[0][0], ds[0][0])
-
-
-EXTRA_CHANGES = [
-    {"aug_gain": 0.2},
-    {"aug_rotate": 1},
-    {"aug_shift": 0.5},
-    {"downsample": 2},
-    {"downsample": 4, "k": 2},  # L = 20: 4 must divide the kernel length
-    {"ssm_speed": 1},
-    {"ssm_speed": 0.25},
-    {"ssm_lr_scale": 0.1},
-    {"ssm_decay_A": False},
-]
-
-
-@pytest.mark.parametrize("change", EXTRA_CHANGES)
-def test_run_with_each_extra_change(tmp_path, data_dir, change):
-    m = run({**PARAMS, "seeds": [0], **change}, data_dir, tmp_path / "out")
-    assert np.isfinite(m["val"]["mae"]["mean"])
-
-
-def count_fit(monkeypatch):
-    """Patch scripts.train.fit to count its calls; returns the list it appends to."""
-    import scripts.train as train_module
-
-    calls, real_fit = [], train_module.fit
-    monkeypatch.setattr(train_module, "fit", lambda *a, **k: calls.append(1) or real_fit(*a, **k))
-    return calls
-
-
-def test_run_resumes_finished_seeds(tmp_path, data_dir, monkeypatch):
-    out = tmp_path / "out"
-    first = run(PARAMS, data_dir, out, resume=True)
-    (out / "metrics.json").unlink()
-    (out / "seed_1/result.json").unlink()  # as if the laptop turned off while training seed 1
-    calls = count_fit(monkeypatch)
-    second = run(PARAMS, data_dir, out, resume=True)
-    assert len(calls) == 1
-    assert second["seeds"]["0"] == first["seeds"]["0"]
-    assert {r["seed"] for r in csv.DictReader(open(out / "history.csv"))} == {"0", "1"}
-
-
-def test_resume_ignores_results_from_other_params(tmp_path, data_dir, monkeypatch):
-    run(PARAMS, data_dir, tmp_path / "out", resume=True)
-    calls = count_fit(monkeypatch)
-    run({**PARAMS, "aug_gain": 0.2}, data_dir, tmp_path / "out", resume=True)
-    assert len(calls) == 2
-
-
-def test_run_without_resume_retrains(tmp_path, data_dir, monkeypatch):
-    run(PARAMS, data_dir, tmp_path / "out")
-    calls = count_fit(monkeypatch)
-    run(PARAMS, data_dir, tmp_path / "out")
-    assert len(calls) == 2
+    # 3. Evaluate with lookahead=0 and lookahead=10
+    metrics_path = out_dir / "metrics.json"
+    evaluate.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--manifest",
+            str(manifest_file),
+            "--checkpoint",
+            str(ckpt_path),
+            "--output",
+            str(metrics_path),
+        ]
+    )
+    assert metrics_path.exists()
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert "raw_accuracy" in metrics and "transition_accuracy" in metrics
+    assert "lookahead_0" in metrics["by_lookahead"]
+    assert "lookahead_10" in metrics["by_lookahead"]

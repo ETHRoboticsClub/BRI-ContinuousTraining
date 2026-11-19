@@ -8,26 +8,45 @@ stages:
     params:
       - src/params.yaml:
           - preprocessing
+          - model.num_classes
+          - train.data_root
+          - train.dataset_selection
+          - train.epn_subset_percentage
     outs:
-      - data/processed/emg_fk
+      - data/processed/reactemg
 
   train:
     cmd: python scripts/train.py
     deps:
-      - data/processed/emg_fk
+      - data/processed/reactemg
       - scripts/train.py
-      - src/augment.py
       - src/dataset.py
+      - src/masking.py
+      - src/metrics.py
       - src/model
+      - src/preprocess.py
       - src/trainer.py
     params:
       - src/params.yaml:
+          - model
           - train
+          - eval
     outs:
-      - output
+      - output/best_model.pt
 
-metrics:
-  - output/metrics.json
+  evaluate:
+    cmd: python scripts/evaluate.py
+    deps:
+      - output/best_model.pt
+      - scripts/evaluate.py
+      - src/metrics.py
+      - src/dataset.py
+      - src/model
+    params:
+      - src/params.yaml:
+          - eval
+    metrics:
+      - output/metrics.json
 
 plots:
   - output/history.csv:

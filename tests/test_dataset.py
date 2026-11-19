@@ -1,112 +1,151 @@
+"""Unit tests for ReactEMG preprocessing, masking, file discovery, and dataset."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
 import numpy as np
-import pytest
+import pandas as pd
 import torch
-from numpy.lib.stride_tricks import sliding_window_view
 
-from src.dataset import EMGFK, kernel_length, recording_path, save_recording, shortest_recording
-from src.model.tangent_space import n_steps
-
-
-def make(tmp_path, s, T):
-    """Write a seeded synthetic recording for subject s with T raw samples and return (emg, angles)."""
-    rng = np.random.default_rng(s)
-    emg = rng.standard_normal((8, T)).astype(np.float32)
-    angles = rng.standard_normal((15, T)).astype(np.float32)
-    save_recording(recording_path(tmp_path, s), emg, angles)
-    return emg, angles
+from src.dataset import (
+    CLASS_NAMES_6,
+    LabeledUnlabeledSampler,
+    ReactEMGDataset,
+    discover_reactemg_files,
+    load_reactemg_file,
+)
+from src.masking import masking_a2a
+from src.preprocess import LEFT_HAND_REMAP, Preprocess
 
 
-def test_k1_stride40_matches_old_windows(tmp_path):  # the pre-change build logic
-    emg, angles = make(tmp_path, 1, T=2000)
-    ds = EMGFK(tmp_path, [1], 240, 40, normalization="none")
-    old_X = sliding_window_view(emg, 240, axis=1)[:, ::40].transpose(1, 0, 2)
-    old_y = angles[:, 239::40].T
-    assert len(ds) == len(old_X)
-    for i in range(len(ds)):
-        assert np.array_equal(ds[i][0].numpy(), old_X[i]) and np.array_equal(ds[i][1].numpy(), old_y[i])
+def test_preprocess_medfilt_rectify_scale_and_lefthand_remap() -> None:
+    raw = np.zeros((25, 8), dtype=np.float32)
+    # Single spike on ch 1 at t=5 should be suppressed by median filter before rectification
+    raw[:, 0] = -64.0
+    raw[5, 1] = 120.0
+    raw[:, 2] = 32.0
+
+    prep_right = Preprocess(hand_choice="right", median_filter_size=3, medfilt_order="before_rec")
+    out_r = prep_right.preprocess_sequence(raw)
+    assert out_r.shape == (25, 8)
+    assert out_r.dtype == np.float32
+    assert np.isclose(out_r[10, 0], 64.0 / 128.0, atol=1e-5)
+    assert np.isclose(out_r[5, 1], 0.0, atol=1e-5)
+
+    prep_left = Preprocess(hand_choice="left", median_filter_size=3, medfilt_order="after_rec")
+    out_l = prep_left.preprocess_sequence(raw)
+    # Under LEFT_HAND_REMAP=(6,5,4,3,2,1,0,7), out[:, 6]=raw[:, 0] (64/128) and out[:, 4]=raw[:, 2] (32/128)
+    assert LEFT_HAND_REMAP == (6, 5, 4, 3, 2, 1, 0, 7)
+    assert np.isclose(out_l[10, 6], 64.0 / 128.0, atol=1e-5)
+    assert np.isclose(out_l[10, 4], 32.0 / 128.0, atol=1e-5)
 
 
-@pytest.mark.parametrize("length,stride", [(1040, 40), (1040, 520), (1040, 1040), (240, 120)])
-def test_counts_and_alignment(tmp_path, length, stride):
-    emg, angles = make(tmp_path, 1, T=5000)
-    ds = EMGFK(tmp_path, [1], length, stride, normalization="none")
-    assert len(ds) == (5000 - length) // stride + 1
-    e = length - 1 + 3 * stride
-    assert np.array_equal(ds[3][0].numpy(), emg[:, e - length + 1 : e + 1])
-    assert np.array_equal(ds[3][1].numpy(), angles[:, e])
+def test_masking_a2a_modes() -> None:
+    rng = np.random.default_rng(7)
+    actions = np.repeat(np.arange(4), 30).astype(np.int64)  # length 120, transitions at 30, 60, 90
+
+    masked_p, pos_p = masking_a2a(actions, 0.5, "poisson", [0], mask_token=6, rng=rng)
+    assert masked_p.shape == (120,)
+    assert pos_p.shape == (120,)
+    assert int(pos_p.sum()) == 60
+    assert np.all(masked_p[pos_p] == 6)
+
+    masked_end, pos_end = masking_a2a(actions, 0.25, "end", [0], mask_token=6, rng=rng)
+    assert np.all(pos_end[-30:]) and not np.any(pos_end[:-30])
+    assert np.all(masked_end[-30:] == 6)
+
+    masked_tgt, pos_tgt = masking_a2a(
+        actions, 0.0, "targeted", [0], mask_token=6, transition_index=60, transition_buffer=10, rng=rng
+    )
+    assert int(pos_tgt.sum()) == 20
+    assert np.all(pos_tgt[50:70])
+    assert np.all(masked_tgt[50:70] == 6)
 
 
-def test_subject_filter_and_concat(tmp_path):
-    emg1, angles1 = make(tmp_path, 1, T=3000)
-    emg2, angles2 = make(tmp_path, 2, T=4000)
-    make(tmp_path, 3, T=5000)
-    ds = EMGFK(tmp_path, [1, 2], 1040, 40, normalization="none")
-    n1, n2 = (3000 - 1040) // 40 + 1, (4000 - 1040) // 40 + 1
-    assert (ds.channels, ds.targets) == (8, 15)
-    assert len(ds) == n1 + n2
-    assert np.array_equal(ds[n1 - 1][1].numpy(), angles1[:, 1039 + (n1 - 1) * 40])
-    assert np.array_equal(ds[n1][0].numpy(), emg2[:, :1040])
-    assert np.array_equal(ds[n1][1].numpy(), angles2[:, 1039])
+def test_csv_npy_loading_and_6class_discovery(tmp_path: Path) -> None:
+    assert len(CLASS_NAMES_6) == 6
+    epn_dir = tmp_path / "EMG-EPN-612" / "s1"
+    roam_dir = tmp_path / "ROAM_EMG" / "s1"
+    epn_dir.mkdir(parents=True)
+    roam_dir.mkdir(parents=True)
+
+    # Create CSVs covering all 6 classes (including wavein, waveout, pinch) and an unlabel file
+    for name, cls_id in [("wavein.csv", 3), ("waveout.csv", 4), ("pinch.csv", 5), ("open.csv", 1)]:
+        df = pd.DataFrame(
+            {
+                "gt": np.full(150, cls_id, dtype=np.int64),
+                **{f"emg_{c}": np.full(150, 16, dtype=np.int64) for c in range(8)},
+            }
+        )
+        df.to_csv(epn_dir / name, index=False)
+
+    npy_arr = np.zeros((150, 9), dtype=np.float32)
+    npy_arr[:, 0] = 2
+    npy_arr[:, 1:] = 32.0
+    np.save(roam_dir / "close.npy", npy_arr)
+
+    df_unlab = pd.DataFrame({f"emg_{c}": np.ones(150, dtype=np.int64) for c in range(8)})
+    df_unlab.to_csv(roam_dir / "subject_unlabel.csv", index=False)
+
+    emg_csv, gt_csv = load_reactemg_file(epn_dir / "wavein.csv", num_classes=6)
+    assert emg_csv.shape == (150, 8) and np.all(gt_csv == 3)
+
+    emg_npy, gt_npy = load_reactemg_file(roam_dir / "close.npy", num_classes=6)
+    assert emg_npy.shape == (150, 8) and np.all(gt_npy == 2)
+
+    splits_pub = discover_reactemg_files(tmp_path, dataset_selection="pub_with_epn", num_classes=6, val_split_ratio=0.2)
+    all_supervised_names = {p.name for p in splits_pub["train"] + splits_pub["val"]}
+    assert {"wavein.csv", "waveout.csv", "pinch.csv", "open.csv", "close.npy"}.issubset(all_supervised_names)
+    assert all("unlabel" not in p.name for p in splits_pub["train"] + splits_pub["val"])
+    assert len(splits_pub["unlabeled"]) == 1 and splits_pub["unlabeled"][0].name == "subject_unlabel.csv"
+
+    splits_epn = discover_reactemg_files(tmp_path, dataset_selection="epn_only", num_classes=6, val_split_ratio=0.25)
+    epn_names = {p.name for p in splits_epn["train"] + splits_epn["val"]}
+    assert epn_names == {"wavein.csv", "waveout.csv", "pinch.csv", "open.csv"}
 
 
-def test_short_recording_yields_no_examples(tmp_path):
-    make(tmp_path, 1, T=500)
-    make(tmp_path, 2, T=3000)
-    ds = EMGFK(tmp_path, [1, 2], 1040, 40)
-    assert len(ds) == (3000 - 1040) // 40 + 1
+def test_reactemg_dataset_8tuple_and_sampler(tmp_path: Path) -> None:
+    p = tmp_path / "seq.csv"
+    gt = np.concatenate([np.zeros(60, dtype=np.int64), np.full(60, 5, dtype=np.int64)])
+    df = pd.DataFrame({"gt": gt, **{f"emg_{c}": np.full(120, 64, dtype=np.int64) for c in range(8)}})
+    df.to_csv(p, index=False)
 
+    ds = ReactEMGDataset(
+        [p],
+        window_size=120,
+        stride=10,
+        num_classes=6,
+        task_selection=(0, 1, 2, 3),
+        deterministic=True,
+        seed=12,
+    )
+    assert len(ds) == 4
+    assert ds.labeled_indices == [0, 1, 2]
+    assert ds.unlabeled_indices == [3]
 
-def test_shortest_recording(tmp_path):
-    make(tmp_path, 1, T=3000)
-    make(tmp_path, 2, T=4000)
-    assert shortest_recording(tmp_path) == 3000
+    # Task 0: EMG clean, action masked
+    emg_w, act_w, m_emg, m_act, mp_emg, mp_act, t_idx, trans_idx = ds[0]
+    assert emg_w.shape == (120, 8) and m_emg.shape == (120, 8)
+    assert act_w.shape == (120,) and m_act.shape == (120,)
+    assert int(t_idx.item()) == 0
+    assert int(trans_idx.item()) == 60
+    assert not torch.any(mp_emg)
+    assert torch.any(mp_act)
 
+    # Task 1: Action clean, EMG masked
+    _, _, _, _, mp_emg_1, mp_act_1, t_idx_1, _ = ds[1]
+    assert int(t_idx_1.item()) == 1
+    assert torch.any(mp_emg_1)
+    assert not torch.any(mp_act_1)
 
-def test_kernel_length_caps_and_warns():
-    assert kernel_length(5, 360_000) == 50
-    with pytest.warns(UserWarning):
-        assert kernel_length(5, 500) == n_steps(500)
+    # Task 3: Self-supervised EMG (actions all <MASK> = 6, mask_pos_actions False)
+    _, act_3, _, m_act_3, mp_emg_3, mp_act_3, t_idx_3, _ = ds[3]
+    assert int(t_idx_3.item()) == 3
+    assert torch.all(act_3 == 6) and torch.all(m_act_3 == 6)
+    assert torch.any(mp_emg_3) and not torch.any(mp_act_3)
 
-
-def make_raw(tmp_path, s, T, scale):
-    """Write an un-normalized recording (per-channel offset, std about `scale`) and return its EMG."""
-    rng = np.random.default_rng(s)
-    emg = (scale * rng.standard_normal((8, T)) + 1e-6 * rng.standard_normal((8, 1))).astype(np.float32)
-    save_recording(recording_path(tmp_path, s), emg, np.zeros((15, T)))
-    return emg
-
-
-def test_subject_normalization_matches_old_build(tmp_path):
-    raw = make_raw(tmp_path, 1, 3000, 3e-5)
-    old = (raw - raw.mean(1, keepdims=True)) / (raw.std(1, keepdims=True) + 1e-6)  # the old build_dataset line
-    ds = EMGFK(tmp_path, [1], 240, 40)  # default normalization
-    np.testing.assert_allclose(ds[5][0].numpy(), old[:, 200:440], rtol=1e-6, atol=1e-7)  # e = 239 + 5 * 40
-
-
-def test_set_normalization_pools_the_datasets_subjects(tmp_path):
-    e1 = make_raw(tmp_path, 1, 3000, 1e-5)
-    e2 = make_raw(tmp_path, 2, 3000, 4e-5)
-    make_raw(tmp_path, 3, 3000, 1.0)  # not loaded, so not in the statistics
-    ds = EMGFK(tmp_path, [1, 2], 240, 40, normalization="set")
-    cat = np.concatenate([e1, e2], 1)
-    expected = (e2 - cat.mean(1, keepdims=True)) / (cat.std(1, keepdims=True) + 1e-6)
-    first_of_2 = (3000 - 240) // 40 + 1
-    np.testing.assert_allclose(ds[first_of_2][0].numpy(), expected[:, :240], rtol=1e-5, atol=1e-6)
-
-
-def test_set_equals_subject_for_one_subject(tmp_path):
-    make_raw(tmp_path, 1, 3000, 3e-5)
-    subject = EMGFK(tmp_path, [1], 240, 40, normalization="subject")
-    pooled = EMGFK(tmp_path, [1], 240, 40, normalization="set")
-    assert torch.equal(subject[7][0], pooled[7][0])
-
-
-def test_none_returns_stored_emg(tmp_path):
-    raw = make_raw(tmp_path, 1, 3000, 3e-5)
-    assert np.array_equal(EMGFK(tmp_path, [1], 240, 40, normalization="none")[0][0].numpy(), raw[:, :240])
-
-
-def test_unknown_normalization_raises(tmp_path):
-    make_raw(tmp_path, 1, 3000, 3e-5)
-    with pytest.raises(ValueError):
-        EMGFK(tmp_path, [1], 240, 40, normalization="global")
+    sampler = LabeledUnlabeledSampler(ds, unlabeled_weight=0.5, seed=99)
+    sampled = list(iter(sampler))
+    assert len(sampled) == 4
+    assert set(sampled) == {0, 1, 2, 3}
