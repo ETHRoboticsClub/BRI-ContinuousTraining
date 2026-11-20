@@ -24,9 +24,9 @@ model:
 
 train:
   data_root: "data/raw/reactemg"
-  dataset_selection: "pub_with_epn" # "epn_only" or "pub_with_epn" for 6-class training
-  epn_subset_percentage: 1.0
-  window_stride: 30             # 150 ms sliding stride during training
+  dataset_selection: "epn_only" # 6-class training on EMG-EPN-612 (all 6 gestures)
+  epn_subset_percentage: 0.05
+  window_stride: 60             # 300 ms sliding stride across 5 s trials
   task_selection: [0, 1, 2]     # 0=action_rec, 1=emg_rec, 2=joint_rec, 3=unlabeled_emg
   lambda_poisson: 7.0
   sampling_probability_poisson: 0.99
@@ -36,14 +36,14 @@ train:
   with_training_curriculum: false
   scale_emg_loss: 0             # 0: L_emg + L_act, 1: 100*L_emg + L_act
   noise: 0.0
-  batch_size: 128
+  batch_size: 256
   epochs: 12
-  lr: 0.0001
+  lr: 0.0002
   weight_decay: 0.01
   warmup_ratio: 0.05
   lr_decay_method: "linear"     # "linear", "cosine", or "exponential"
   grad_clip: 1.0
-  saved_checkpoint_pth: null    # Train from scratch per user decision
+  saved_checkpoint_pth: null    # Train from scratch by default
   val_split_ratio: 0.05         # 5% held-out files for pub_with_epn / epn_only validation
   seeds: [42]
   device: "cuda"

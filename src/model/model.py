@@ -124,8 +124,7 @@ class Any2Any_Model(nn.Module):
         _ = (emg_window, action_window)
         if masked_emg.dim() != 3 or masked_emg.shape[1] != self.window_size or masked_emg.shape[2] != self.channels:
             raise ValueError(
-                f"Expected masked_emg of shape (B, {self.window_size}, {self.channels}), "
-                f"got {tuple(masked_emg.shape)}"
+                f"Expected masked_emg of shape (B, {self.window_size}, {self.channels}), got {tuple(masked_emg.shape)}"
             )
         batch_size = masked_emg.size(0)
 
@@ -155,20 +154,17 @@ class Any2Any_Model(nn.Module):
         src = torch.cat([emg_tokens, action_tokens], dim=1)  # (B, 2W, D)
         seq_len = src.size(1)
 
-        # Build float additive mask (-inf on blocked pairs) or bool mask for PyTorch MultiheadAttention.
-        # Bool mask: True blocks attention. When task_idx == 3 (unlabeled self-supervised EMG),
-        # block all attention keys belonging to the action tokens; also avoid blocking diagonal on
-        # action self-queries (keeping them self-attending) or keep exact reactemg blocking on non-diagonal.
-        attention_mask = torch.zeros((batch_size, seq_len, seq_len), dtype=torch.bool, device=src.device)
         task3_rows = (task_idx == 3).nonzero(as_tuple=False).flatten()
         if task3_rows.numel() > 0:
             # Block EMG->action and action->EMG cross-attention cleanly, and allow action tokens
             # self-attention to avoid NaN rows in PyTorch MHA softmax.
+            attention_mask = torch.zeros((batch_size, seq_len, seq_len), dtype=torch.bool, device=src.device)
             attention_mask[task3_rows, : self.window_size, self.window_size :] = True
             attention_mask[task3_rows, self.window_size :, : self.window_size] = True
-
-        attention_mask = attention_mask.repeat_interleave(self.nhead, dim=0)
-        encoded = self.transformer_encoder(src, mask=attention_mask)
+            attention_mask = attention_mask.repeat_interleave(self.nhead, dim=0)
+            encoded = self.transformer_encoder(src, mask=attention_mask)
+        else:
+            encoded = self.transformer_encoder(src)
         if return_output:
             return encoded
 

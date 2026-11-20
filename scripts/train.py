@@ -133,6 +133,7 @@ def train_from_config(args: argparse.Namespace) -> Path:
         seed=seed,
     )
 
+    pin_mem = bool(device.type == "cuda")
     if 3 in task_selection and splits["unlabeled"]:
         unlabeled_ds = ReactEMGDataset(
             file_paths=splits["unlabeled"],
@@ -156,11 +157,11 @@ def train_from_config(args: argparse.Namespace) -> Path:
             combined.labeled_indices = list(range(labeled_count))  # type: ignore[attr-defined]
             combined.unlabeled_indices = list(range(labeled_count, labeled_count + len(unlabeled_ds)))  # type: ignore[attr-defined]
             sampler = LabeledUnlabeledSampler(combined, seed=seed)  # type: ignore[arg-type]
-            train_loader = DataLoader(combined, batch_size=batch_size, sampler=sampler)
+            train_loader = DataLoader(combined, batch_size=batch_size, sampler=sampler, pin_memory=pin_mem)
         else:
-            train_loader = DataLoader(labeled_train_ds, batch_size=batch_size, shuffle=True)
+            train_loader = DataLoader(labeled_train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_mem)
     else:
-        train_loader = DataLoader(labeled_train_ds, batch_size=batch_size, shuffle=True)
+        train_loader = DataLoader(labeled_train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_mem)
 
     val_loader: DataLoader | None = None
     if splits["val"]:
@@ -181,7 +182,7 @@ def train_from_config(args: argparse.Namespace) -> Path:
             seed=seed,
         )
         if len(val_ds) > 0:
-            val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+            val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_mem)
 
     saved_ckpt = train_cfg.get("saved_checkpoint_pth")
     if saved_ckpt is not None:

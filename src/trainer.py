@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,6 +15,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.dataset import load_reactemg_file
 from src.metrics import LookaheadAggregator, aggregate_sequence_metrics, evaluate_transition_accuracy
@@ -218,6 +220,12 @@ class ReactEMGTrainer:
 
         self.optimizer = AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.scheduler: LambdaLR | None = None
+        self._use_bf16 = bool(self.device.type == "cuda" and torch.cuda.is_bf16_supported())
+
+    def _autocast_ctx(self):
+        if self._use_bf16:
+            return torch.amp.autocast("cuda", dtype=torch.bfloat16)
+        return nullcontext()
 
     def train_epoch(self, train_loader: DataLoader) -> dict[str, float]:
         """Run one training epoch weighted by masked EMG and action counts."""
@@ -230,15 +238,17 @@ class ReactEMGTrainer:
         act_count_total = 0
         act_correct_total = 0
 
-        for batch in train_loader:
+        iterator = tqdm(train_loader, desc="Train", leave=False, disable=len(train_loader) <= 20)
+        for batch in iterator:
             self.optimizer.zero_grad(set_to_none=True)
-            res = process_batch(
-                self.model,
-                batch,
-                device=self.device,
-                scale_emg_loss=self.scale_emg_loss,
-                num_classes=self.model.num_classes,
-            )
+            with self._autocast_ctx():
+                res = process_batch(
+                    self.model,
+                    batch,
+                    device=self.device,
+                    scale_emg_loss=self.scale_emg_loss,
+                    num_classes=self.model.num_classes,
+                )
             loss = res["loss"]
             loss.backward()
             if self.grad_clip > 0.0:
@@ -277,13 +287,14 @@ class ReactEMGTrainer:
         act_correct_total = 0
 
         for batch in val_loader:
-            res = process_batch(
-                self.model,
-                batch,
-                device=self.device,
-                scale_emg_loss=self.scale_emg_loss,
-                num_classes=self.model.num_classes,
-            )
+            with self._autocast_ctx():
+                res = process_batch(
+                    self.model,
+                    batch,
+                    device=self.device,
+                    scale_emg_loss=self.scale_emg_loss,
+                    num_classes=self.model.num_classes,
+                )
             total_loss_sum += float(res["loss"].detach().item())
             step_count += 1
             if res["emg_count"] > 0:
@@ -339,7 +350,9 @@ class ReactEMGTrainer:
             )
             if len(emg_tc) < self.model.window_size or np.all(gt < 0):
                 continue
-            preds, _ = aggregator.predict_sequence(self.model, emg_tc, stride=stride, device=self.device)
+            preds, _ = aggregator.predict_sequence(
+                self.model, emg_tc, stride=stride, batch_size=128, device=self.device, pad_initial=True
+            )
             res = evaluate_transition_accuracy(
                 preds,
                 gt,
@@ -431,6 +444,16 @@ class ReactEMGTrainer:
                 "lr": current_lr,
             }
             history.append(row)
+            if len(train_loader) > 20:
+                print(
+                    f"[Epoch {epoch_idx + 1:2d}/{int(epochs)}] "
+                    f"train_loss={train_metrics['train_loss']:.4f} "
+                    f"train_acc={train_metrics['train_action_acc']:.4f} | "
+                    f"val_loss={val_metrics['val_loss']:.4f} "
+                    f"val_acc={val_metrics['val_action_acc']:.4f} "
+                    f"lr={current_lr:.2e}",
+                    flush=True,
+                )
 
             if score <= best_val_loss:
                 best_val_loss = score

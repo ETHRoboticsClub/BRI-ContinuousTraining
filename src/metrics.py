@@ -172,26 +172,38 @@ class LookaheadAggregator:
         stride: int = 1,
         batch_size: int = 64,
         device: str | torch.device = "cpu",
+        pad_initial: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Evaluate ``model`` over a full sequence ``(T, C)`` with smoothed look-ahead.
 
+        Args:
+            pad_initial: If True, prepend ``window_size - 1`` tiled resting samples
+                before index 0 so online predictions cover ``0..T-1`` cleanly.
+
         Returns:
             Tuple ``(preds_t, probs_tc)`` aligned to timesteps ``0..T-1``.
-            Positions before the first full window carry ``-1`` and uniform probs,
-            while covered timesteps hold the look-ahead decision with hold cadence
-            ``samples_between_prediction``.
         """
-        seq = np.asarray(emg_tc, dtype=np.float32)
+        raw_seq = np.asarray(emg_tc, dtype=np.float32)
+        orig_len = len(raw_seq)
+        pad_len = self.window_size - 1 if pad_initial and orig_len > 0 else 0
+        if pad_len > 0:
+            seed_seg = raw_seq[: min(100, orig_len)]
+            repeats = (pad_len // len(seed_seg)) + 1
+            pad_prefix = np.tile(seed_seg, (repeats, 1))[:pad_len]
+            seq = np.concatenate([pad_prefix, raw_seq], axis=0)
+        else:
+            seq = raw_seq
+
         t_len, channels = seq.shape
         preds = np.full(t_len, -1, dtype=np.int64)
         probs_seq = np.full((t_len, self.num_classes), 1.0 / self.num_classes, dtype=np.float32)
         if t_len < self.window_size:
-            return preds, probs_seq
+            return preds[pad_len:], probs_seq[pad_len:]
 
         eval_stride = max(1, int(stride))
         starts = list(range(0, t_len - self.window_size + 1, eval_stride))
         if not starts:
-            return preds, probs_seq
+            return preds[pad_len:], probs_seq[pad_len:]
 
         model.eval()
         dev = torch.device(device)
@@ -255,7 +267,7 @@ class LookaheadAggregator:
                 preds[cur_t] = decision_pred
                 probs_seq[cur_t] = decision_probs
 
-        return preds, probs_seq
+        return preds[pad_len:], probs_seq[pad_len:]
 
 
 def extract_buffer_windows(

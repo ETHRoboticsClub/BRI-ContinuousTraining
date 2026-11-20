@@ -46,7 +46,15 @@ class Preprocess:
             arr = arr[:, list(LEFT_HAND_REMAP)]
 
         k = self.median_filter_size
-        if self.medfilt_order == "before_rec":
+        if k == 3:
+
+            def _fast_medfilt3(x_tc: np.ndarray) -> np.ndarray:
+                padded = np.pad(x_tc, ((1, 1), (0, 0)), mode="constant", constant_values=0.0)
+                a, b, c = padded[:-2], padded[1:-1], padded[2:]
+                return np.maximum(np.minimum(a, b), np.minimum(np.maximum(a, b), c))
+
+            arr = np.abs(_fast_medfilt3(arr)) if self.medfilt_order == "before_rec" else _fast_medfilt3(np.abs(arr))
+        elif self.medfilt_order == "before_rec":
             if k > 1:
                 for ch in range(self.channels):
                     arr[:, ch] = medfilt(arr[:, ch], kernel_size=k)

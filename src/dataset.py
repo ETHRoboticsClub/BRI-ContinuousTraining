@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, Sampler
+from tqdm import tqdm
 
 from src.masking import masking_a2a
 from src.preprocess import Preprocess
@@ -24,7 +25,7 @@ CLASS_NAMES_6: tuple[str, ...] = (
 CLASS_NAMES_3: tuple[str, ...] = ("Relax", "Open", "Close")
 
 REACTEMG_DOWNLOAD_URL: str = (
-    "https://www.dropbox.com/scl/fi/isj4450alriqjfstkna2s/data.zip" "?rlkey=n5sf910lopskewzyae0vgn6j7&st=vt89hfpj&dl=1"
+    "https://www.dropbox.com/scl/fi/isj4450alriqjfstkna2s/data.zip?rlkey=n5sf910lopskewzyae0vgn6j7&st=vt89hfpj&dl=1"
 )
 
 _EPN_3CLASS_KEYWORDS: tuple[str, ...] = ("relax", "open", "fist", "close")
@@ -144,7 +145,11 @@ def _filter_by_dataset_selection(
     selection = dataset_selection.lower()
     rel_map = {p: p.relative_to(root).as_posix().lower() for p in labeled_files}
 
-    epn_files = [p for p in labeled_files if "emg-epn-612" in rel_map[p] or "epn" in rel_map[p]]
+    epn_files = [
+        p
+        for p in labeled_files
+        if ("emg-epn-612" in rel_map[p] or "epn" in rel_map[p]) and "testingjson_user" not in rel_map[p]
+    ]
     roam_files = [p for p in labeled_files if "roam" in rel_map[p]]
     other_public = [p for p in labeled_files if p not in set(epn_files) and p not in set(roam_files)]
 
@@ -161,8 +166,9 @@ def _filter_by_dataset_selection(
     if epn_subset_percentage < 1.0 and epn_files:
         keep_n = max(1, int(round(len(epn_files) * float(epn_subset_percentage))))
         if keep_n < len(epn_files):
-            chosen_idx = np.sort(rng.choice(len(epn_files), size=keep_n, replace=False))
-            epn_files = [epn_files[int(i)] for i in chosen_idx]
+            epn_sorted = sorted(epn_files)
+            chosen_idx = np.sort(rng.choice(len(epn_sorted), size=keep_n, replace=False))
+            epn_files = [epn_sorted[int(i)] for i in chosen_idx]
 
     if selection == "epn_only":
         selected = epn_files if epn_files else labeled_files
@@ -313,6 +319,7 @@ class ReactEMGDataset(Dataset):
         self.is_unlabeled = bool(is_unlabeled)
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
+        self._rng = np.random.default_rng(self.seed)
 
         self.recordings_emg: list[np.ndarray] = []
         self.recordings_actions: list[np.ndarray] = []
@@ -323,7 +330,11 @@ class ReactEMGDataset(Dataset):
         self._load_and_index()
 
     def _load_and_index(self) -> None:
-        for path in self.file_paths:
+        for path in tqdm(
+            self.file_paths,
+            desc="Loading ReactEMG recordings",
+            disable=len(self.file_paths) <= 20,
+        ):
             emg_tc, actions = load_reactemg_file(
                 path,
                 preprocess=self.preprocess,
@@ -380,7 +391,7 @@ class ReactEMGDataset(Dataset):
         emg_win = self.recordings_emg[rec_idx][start:end].copy()
         act_win = self.recordings_actions[rec_idx][start:end].copy()
 
-        rng = np.random.default_rng(self.seed + idx) if self.deterministic else np.random.default_rng()
+        rng = np.random.default_rng(self.seed + idx) if self.deterministic else self._rng
 
         if self.noise > 0.0 and not self.deterministic:
             emg_win = np.clip(
@@ -393,7 +404,24 @@ class ReactEMGDataset(Dataset):
             act_win = np.full(self.window_size, self.mask_token_id, dtype=np.int64)
 
         p_emg = float(rng.uniform(self.poisson_mask_range[0], self.poisson_mask_range[1]))
-        if rng.random() < self.sampling_probability_poisson:
+        if task_idx == 0:
+            if self.deterministic:
+                # Validation measures full-window all-<MASK> inference performance directly.
+                act_mask_type = "end"
+                p_act = 1.0
+            else:
+                # Stage-2 curriculum: predominantly 100% action masking so inference-time all-<MASK> works accurately.
+                r_stage = float(rng.random())
+                if r_stage < 0.80:
+                    act_mask_type = "end"
+                    p_act = 1.0
+                elif r_stage < 0.90 and trans_idx >= 0:
+                    act_mask_type = "targeted"
+                    p_act = 0.0
+                else:
+                    act_mask_type = "poisson"
+                    p_act = float(rng.uniform(self.poisson_mask_range[0], self.poisson_mask_range[1]))
+        elif rng.random() < self.sampling_probability_poisson:
             act_mask_type = "poisson"
             p_act = float(rng.uniform(self.poisson_mask_range[0], self.poisson_mask_range[1]))
         elif trans_idx >= 0 and rng.random() < 0.5:
