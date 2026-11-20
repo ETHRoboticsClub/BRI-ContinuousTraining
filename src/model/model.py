@@ -154,7 +154,14 @@ class Any2Any_Model(nn.Module):
         src = torch.cat([emg_tokens, action_tokens], dim=1)  # (B, 2W, D)
         seq_len = src.size(1)
 
-        task3_rows = (task_idx == 3).nonzero(as_tuple=False).flatten()
+        if isinstance(task_idx, int):
+            task_idx_t = torch.full((batch_size,), task_idx, dtype=torch.long, device=src.device)
+        elif not torch.is_tensor(task_idx):
+            task_idx_t = torch.as_tensor(task_idx, dtype=torch.long, device=src.device).reshape(-1)
+        else:
+            task_idx_t = task_idx.reshape(-1)
+
+        task3_rows = (task_idx_t == 3).nonzero(as_tuple=False).flatten()
         if task3_rows.numel() > 0:
             # Block EMG->action and action->EMG cross-attention cleanly, and allow action tokens
             # self-attention to avoid NaN rows in PyTorch MHA softmax.

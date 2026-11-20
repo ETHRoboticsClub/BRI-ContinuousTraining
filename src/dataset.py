@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -133,6 +134,11 @@ def _is_unlabeled_path(path: Path, root: Path) -> bool:
     return "unlabel" in rel
 
 
+def _is_epn_path(rel_posix: str) -> bool:
+    """Return True if a relative POSIX path belongs to EMG-EPN-612."""
+    return "emg-epn-612" in rel_posix or "epn" in rel_posix
+
+
 def _filter_by_dataset_selection(
     labeled_files: list[Path],
     root: Path,
@@ -145,30 +151,27 @@ def _filter_by_dataset_selection(
     selection = dataset_selection.lower()
     rel_map = {p: p.relative_to(root).as_posix().lower() for p in labeled_files}
 
-    epn_files = [
-        p
-        for p in labeled_files
-        if ("emg-epn-612" in rel_map[p] or "epn" in rel_map[p]) and "testingjson_user" not in rel_map[p]
-    ]
-    roam_files = [p for p in labeled_files if "roam" in rel_map[p]]
-    other_public = [p for p in labeled_files if p not in set(epn_files) and p not in set(roam_files)]
+    epn_files = [p for p in labeled_files if _is_epn_path(rel_map[p]) and "testingjson_user" not in rel_map[p]]
+    roam_files = [p for p in labeled_files if "roam" in rel_map[p] and not _is_epn_path(rel_map[p])]
+    roam_set = set(roam_files)
+    other_public = [p for p in labeled_files if not _is_epn_path(rel_map[p]) and p not in roam_set]
 
     # Apply EPN 3-class filtering only when num_classes == 3; 6-class keeps all gestures.
     if int(num_classes) == 3 and epn_files:
-        filtered_epn: list[Path] = []
-        for p in epn_files:
-            name_lower = p.name.lower()
-            if any(k in name_lower for k in _EPN_3CLASS_KEYWORDS):
-                filtered_epn.append(p)
-        if filtered_epn:
-            epn_files = filtered_epn
+        if selection == "pub_with_epn":
+            open_fist = [p for p in epn_files if "open" in p.name.lower() or "fist" in p.name.lower()]
+            if open_fist:
+                epn_files = open_fist
+        else:
+            filtered_epn = [p for p in epn_files if any(k in p.name.lower() for k in _EPN_3CLASS_KEYWORDS)]
+            if filtered_epn:
+                epn_files = filtered_epn
 
     if epn_subset_percentage < 1.0 and epn_files:
-        keep_n = max(1, int(round(len(epn_files) * float(epn_subset_percentage))))
-        if keep_n < len(epn_files):
-            epn_sorted = sorted(epn_files)
-            chosen_idx = np.sort(rng.choice(len(epn_sorted), size=keep_n, replace=False))
-            epn_files = [epn_sorted[int(i)] for i in chosen_idx]
+        epn_pool = sorted(epn_files)
+        perm_epn = rng.permutation(len(epn_pool))
+        keep_n = max(1, int(round(len(epn_pool) * float(epn_subset_percentage))))
+        epn_files = [epn_pool[int(i)] for i in perm_epn[:keep_n]]
 
     if selection == "epn_only":
         selected = epn_files if epn_files else labeled_files
@@ -200,15 +203,29 @@ def discover_reactemg_files(
     """Discover and split ReactEMG recording paths into train, val, and unlabeled pools.
 
     Supports ``pub_with_epn``, ``epn_only``, ``roam_only``, and ``custom_folder`` modes.
-    Retains all 6 classes when ``num_classes == 6``, excludes ``"unlabel"`` files from
-    the labeled splits, and places explicit ``val`` / ``validation`` directory files into
-    ``val`` if present or uses a deterministic ``val_split_ratio`` split otherwise.
+    Retains all 6 classes when ``num_classes == 6``, excludes ``"unlabel"`` and
+    ``testingJSON_user*`` files from supervised splits, and places explicit ``val`` /
+    ``validation`` directory files into ``val`` if present or uses a deterministically
+    shuffled ``val_split_ratio`` split otherwise.
     """
     root = Path(data_root)
     if not root.exists():
         return {"train": [], "val": [], "unlabeled": []}
 
-    all_files = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in {".csv", ".npy"})
+    selection_lc = dataset_selection.lower()
+    epn_only_root = root / "EMG-EPN-612"
+    walk_root = epn_only_root if (selection_lc == "epn_only" and epn_only_root.is_dir()) else root
+
+    all_files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(walk_root):
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if not d.startswith(".") and d != "__pycache__" and not d.lower().startswith("testingjson_user")
+        )
+        for fname in sorted(filenames):
+            if fname.lower().endswith((".csv", ".npy")):
+                all_files.append(Path(dirpath) / fname)
 
     unlabeled_files: list[Path] = []
     labeled_files: list[Path] = []
@@ -229,36 +246,37 @@ def discover_reactemg_files(
     )
 
     if not selected:
-        return {"train": [], "val": [], "unlabeled": unlabeled_files}
+        return {"train": [], "val": [], "unlabeled": sorted(unlabeled_files)}
 
     explicit_val: list[Path] = []
     explicit_train: list[Path] = []
     for p in selected:
         rel_parts = {part.lower() for part in p.relative_to(root).parts[:-1]}
-        if "val" in rel_parts or "validation" in rel_parts:
-            explicit_val.append(p)
-        elif "test" in rel_parts:
+        if "val" in rel_parts or "validation" in rel_parts or "test" in rel_parts:
             explicit_val.append(p)
         else:
             explicit_train.append(p)
 
     if explicit_val:
-        train_files = explicit_train
-        val_files = explicit_val
+        perm_tr = rng.permutation(len(explicit_train))
+        perm_va = rng.permutation(len(explicit_val))
+        train_files = [explicit_train[int(i)] for i in perm_tr]
+        val_files = [explicit_val[int(i)] for i in perm_va]
     elif len(selected) == 1 or val_split_ratio <= 0.0:
-        train_files = selected
+        perm = rng.permutation(len(selected))
+        train_files = [selected[int(i)] for i in perm]
         val_files = []
     else:
         perm = rng.permutation(len(selected))
-        val_count = max(1, int(round(len(selected) * float(val_split_ratio))))
-        val_count = min(val_count, len(selected) - 1)
-        val_idx_set = {int(i) for i in perm[:val_count]}
-        val_files = [selected[i] for i in range(len(selected)) if i in val_idx_set]
-        train_files = [selected[i] for i in range(len(selected)) if i not in val_idx_set]
+        shuffled = [selected[int(i)] for i in perm]
+        val_count = max(1, int(round(len(shuffled) * float(val_split_ratio))))
+        val_count = min(val_count, len(shuffled) - 1)
+        val_files = shuffled[:val_count]
+        train_files = shuffled[val_count:]
 
     return {
-        "train": sorted(train_files),
-        "val": sorted(val_files),
+        "train": train_files,
+        "val": val_files,
         "unlabeled": sorted(unlabeled_files),
     }
 
@@ -295,8 +313,13 @@ class ReactEMGDataset(Dataset):
         sampling_probability_poisson: float = 0.99,
         poisson_mask_range: tuple[float, float] = (0.3, 0.75),
         end_mask_range: tuple[float, float] = (0.3, 0.6),
-        transition_buffer: int = 30,
+        transition_buffer: int = 50,
+        stage_1_weights: Sequence[float] = (0.5, 0.5),
+        stage_2_weights: Sequence[float] = (0.01, 0.99),
+        with_training_curriculum: bool = False,
+        embedding_method: str = "linear_projection",
         noise: float = 0.0,
+        noise_std: float | None = None,
         is_unlabeled: bool = False,
         deterministic: bool = False,
         seed: int = 42,
@@ -315,7 +338,12 @@ class ReactEMGDataset(Dataset):
         self.poisson_mask_range = (float(poisson_mask_range[0]), float(poisson_mask_range[1]))
         self.end_mask_range = (float(end_mask_range[0]), float(end_mask_range[1]))
         self.transition_buffer = int(transition_buffer)
-        self.noise = float(noise)
+        self.stage_1_weights = (float(stage_1_weights[0]), float(stage_1_weights[1]))
+        self.stage_2_weights = (float(stage_2_weights[0]), float(stage_2_weights[1]))
+        self.with_training_curriculum = bool(with_training_curriculum)
+        self.embedding_method = str(embedding_method)
+        self.curriculum_stage = 0 if self.with_training_curriculum else 2
+        self.noise = float(noise_std if noise_std is not None else noise)
         self.is_unlabeled = bool(is_unlabeled)
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
@@ -328,6 +356,23 @@ class ReactEMGDataset(Dataset):
         self.unlabeled_indices: list[int] = []
 
         self._load_and_index()
+
+    def set_epoch(self, epoch: int, total_epochs: int = 12) -> None:
+        """Update curriculum stage according to roamlab/reactemg linear_projection schedule."""
+        if not self.with_training_curriculum:
+            self.curriculum_stage = 2
+            return
+        total = max(1, int(total_epochs))
+        if self.embedding_method == "linear_projection":
+            self.curriculum_stage = 0 if int(epoch) < max(1, total // 2) else 2
+        else:
+            third = max(1, total // 3)
+            if int(epoch) < third:
+                self.curriculum_stage = 0
+            elif int(epoch) < 2 * third:
+                self.curriculum_stage = 1
+            else:
+                self.curriculum_stage = 2
 
     def _load_and_index(self) -> None:
         for path in tqdm(
@@ -373,6 +418,58 @@ class ReactEMGDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def _sample_training_masks(
+        self,
+        rng: np.random.Generator,
+        task_idx: int,
+        trans_idx: int,
+    ) -> tuple[str, float]:
+        """Sample mask strategy and percentage matching roamlab/reactemg/dataset.py."""
+        mask_type = (
+            "poisson"
+            if float(rng.random()) < self.sampling_probability_poisson
+            else ("poisson" if task_idx == 3 else "end")
+        )
+        low, high = self.poisson_mask_range if mask_type == "poisson" else self.end_mask_range
+        if task_idx == 3:
+            mask_percentage = float(rng.uniform(max(0.0, low - 0.1), max(0.0, high - 0.1)))
+        else:
+            mask_percentage = float(rng.uniform(low, high))
+
+        selected_stage = 0
+        if task_idx == 0:
+            if self.deterministic:
+                # Deterministic validation directly measures 100%-masked intent prediction.
+                return "end", 1.0
+            if self.curriculum_stage == 1:
+                if self.transition_buffer <= trans_idx <= self.window_size - self.transition_buffer:
+                    selected_stage = 1
+                else:
+                    w0, w1 = self.stage_1_weights
+                    selected_stage = 0 if float(rng.random()) < (w0 / max(1e-12, w0 + w1)) else 1
+            elif self.curriculum_stage >= 2:
+                if self.transition_buffer <= trans_idx <= self.window_size - self.transition_buffer:
+                    selected_stage = 2
+                else:
+                    w0, w2 = self.stage_2_weights
+                    selected_stage = 0 if float(rng.random()) < (w0 / max(1e-12, w0 + w2)) else 2
+
+        if selected_stage == 1 and task_idx == 0:
+            if self.transition_buffer < trans_idx < self.window_size - self.transition_buffer:
+                mask_type = "targeted"
+        elif selected_stage == 2 and task_idx == 0:
+            if self.transition_buffer < trans_idx < self.window_size - self.transition_buffer:
+                if int(rng.integers(0, 2)) == 1:
+                    mask_type = "targeted"
+                else:
+                    mask_type = "end"
+                    mask_percentage = 1.0
+            else:
+                mask_type = "end"
+                mask_percentage = 1.0
+
+        return mask_type, float(mask_percentage)
+
     def __getitem__(
         self, idx: int
     ) -> tuple[
@@ -394,43 +491,13 @@ class ReactEMGDataset(Dataset):
         rng = np.random.default_rng(self.seed + idx) if self.deterministic else self._rng
 
         if self.noise > 0.0 and not self.deterministic:
-            emg_win = np.clip(
-                emg_win + rng.normal(0.0, self.noise, size=emg_win.shape).astype(np.float32),
-                0.0,
-                None,
-            ).astype(np.float32)
+            noise = rng.uniform(-self.noise, self.noise, size=emg_win.shape).astype(np.float32)
+            emg_win = np.clip(emg_win + noise, 0.0, 1.0).astype(np.float32)
 
         if task_idx == 3:
             act_win = np.full(self.window_size, self.mask_token_id, dtype=np.int64)
 
-        p_emg = float(rng.uniform(self.poisson_mask_range[0], self.poisson_mask_range[1]))
-        if task_idx == 0:
-            if self.deterministic:
-                # Validation measures full-window all-<MASK> inference performance directly.
-                act_mask_type = "end"
-                p_act = 1.0
-            else:
-                # Stage-2 curriculum: predominantly 100% action masking so inference-time all-<MASK> works accurately.
-                r_stage = float(rng.random())
-                if r_stage < 0.80:
-                    act_mask_type = "end"
-                    p_act = 1.0
-                elif r_stage < 0.90 and trans_idx >= 0:
-                    act_mask_type = "targeted"
-                    p_act = 0.0
-                else:
-                    act_mask_type = "poisson"
-                    p_act = float(rng.uniform(self.poisson_mask_range[0], self.poisson_mask_range[1]))
-        elif rng.random() < self.sampling_probability_poisson:
-            act_mask_type = "poisson"
-            p_act = float(rng.uniform(self.poisson_mask_range[0], self.poisson_mask_range[1]))
-        elif trans_idx >= 0 and rng.random() < 0.5:
-            act_mask_type = "targeted"
-            p_act = 0.0
-        else:
-            act_mask_type = "end"
-            p_act = float(rng.uniform(self.end_mask_range[0], self.end_mask_range[1]))
-
+        mask_type, mask_pct = self._sample_training_masks(rng, task_idx=task_idx, trans_idx=trans_idx)
         emg_channels = list(range(self.channels))
 
         if task_idx == 0:
@@ -439,8 +506,8 @@ class ReactEMGDataset(Dataset):
             mask_pos_emg = np.zeros_like(emg_win, dtype=bool)
             masked_actions, mask_pos_actions = masking_a2a(
                 act_win,
-                mask_percentage=p_act,
-                mask_type=act_mask_type,
+                mask_percentage=mask_pct,
+                mask_type=mask_type,
                 mask_channel_selection=[0],
                 lambda_poisson=self.lambda_poisson,
                 mask_token=self.mask_token_id,
@@ -452,8 +519,8 @@ class ReactEMGDataset(Dataset):
             # Reconstruct masked EMG from clean actions
             masked_emg, mask_pos_emg = masking_a2a(
                 emg_win,
-                mask_percentage=p_emg,
-                mask_type="poisson",
+                mask_percentage=mask_pct,
+                mask_type=mask_type,
                 mask_channel_selection=emg_channels,
                 mask_alignment=self.mask_alignment,
                 lambda_poisson=self.lambda_poisson,
@@ -463,24 +530,26 @@ class ReactEMGDataset(Dataset):
             masked_actions = act_win.copy()
             mask_pos_actions = np.zeros_like(act_win, dtype=bool)
         elif task_idx == 2:
-            # Joint masked EMG + masked action reconstruction
+            # Joint masked EMG + masked action reconstruction sharing drawn (mask_pct, mask_type)
+            masked_actions, mask_pos_actions = masking_a2a(
+                act_win,
+                mask_percentage=mask_pct,
+                mask_type=mask_type,
+                mask_channel_selection=[0],
+                lambda_poisson=self.lambda_poisson,
+                mask_token=self.mask_token_id,
+                transition_index=trans_idx,
+                transition_buffer=self.transition_buffer,
+                rng=rng,
+            )
             masked_emg, mask_pos_emg = masking_a2a(
                 emg_win,
-                mask_percentage=p_emg,
-                mask_type="poisson",
+                mask_percentage=mask_pct,
+                mask_type=mask_type,
                 mask_channel_selection=emg_channels,
                 mask_alignment=self.mask_alignment,
                 lambda_poisson=self.lambda_poisson,
                 mask_token=0.0,
-                rng=rng,
-            )
-            masked_actions, mask_pos_actions = masking_a2a(
-                act_win,
-                mask_percentage=p_act,
-                mask_type=act_mask_type,
-                mask_channel_selection=[0],
-                lambda_poisson=self.lambda_poisson,
-                mask_token=self.mask_token_id,
                 transition_index=trans_idx,
                 transition_buffer=self.transition_buffer,
                 rng=rng,
@@ -489,8 +558,8 @@ class ReactEMGDataset(Dataset):
             # Self-supervised EMG reconstruction with all actions masked out
             masked_emg, mask_pos_emg = masking_a2a(
                 emg_win,
-                mask_percentage=p_emg,
-                mask_type="poisson",
+                mask_percentage=mask_pct,
+                mask_type=mask_type,
                 mask_channel_selection=emg_channels,
                 mask_alignment=self.mask_alignment,
                 lambda_poisson=self.lambda_poisson,

@@ -64,7 +64,7 @@ def process_batch(
     model: nn.Module,
     batch: tuple[torch.Tensor, ...],
     device: torch.device,
-    scale_emg_loss: int = 0,
+    scale_emg_loss: float | int = 0,
     num_classes: int = 6,
 ) -> dict[str, Any]:
     """Run ReactEMG masked multimodal forward pass and compute masked MSE + CE losses."""
@@ -78,16 +78,17 @@ def process_batch(
         task_idx,
         _transition_idx,
     ) = batch
+    _ = masked_emg
 
     emg_window = emg_window.to(device=device, dtype=torch.float32)
     action_window = action_window.to(device=device, dtype=torch.long)
-    masked_emg = masked_emg.to(device=device, dtype=torch.float32)
     masked_actions = masked_actions.to(device=device, dtype=torch.long)
     mask_positions_emg = mask_positions_emg.to(device=device, dtype=torch.bool)
     mask_positions_actions = mask_positions_actions.to(device=device, dtype=torch.bool)
     task_idx = task_idx.to(device=device, dtype=torch.long)
 
-    emg_out, action_out = model(masked_emg, masked_actions, task_idx, mask_positions_emg)
+    # Pass raw emg_window: Any2Any_Model replaces mask_positions_emg after linear projection.
+    emg_out, action_out = model(emg_window, masked_actions, task_idx, mask_positions_emg)
 
     emg_count = int(mask_positions_emg.sum().item())
     if emg_count > 0:
@@ -107,7 +108,14 @@ def process_batch(
         action_loss = torch.zeros((), device=device, dtype=torch.float32)
         action_correct = 0
 
-    emg_weight = 100.0 if int(scale_emg_loss) == 1 else 1.0
+    scale_val = float(scale_emg_loss)
+    if scale_val == 1.0:
+        emg_weight = 100.0
+    elif scale_val > 1.0:
+        emg_weight = scale_val
+    else:
+        emg_weight = 1.0
+
     if emg_count > 0 and action_count > 0:
         total_loss = emg_weight * emg_loss + action_loss
     elif emg_count > 0:
@@ -118,6 +126,8 @@ def process_batch(
         # Keep computational graph attached on degenerate all-unmasked edge batch
         total_loss = 0.0 * (emg_out.sum() + action_out.sum())
 
+    total_mask_positions = int(mask_positions_emg.sum().item() + mask_positions_actions.sum().item())
+
     return {
         "loss": total_loss,
         "emg_loss": float(emg_loss.detach().item()),
@@ -125,6 +135,7 @@ def process_batch(
         "emg_count": emg_count,
         "action_count": action_count,
         "action_correct": action_correct,
+        "total_mask_positions": total_mask_positions,
     }
 
 
@@ -206,7 +217,7 @@ class ReactEMGTrainer:
         warmup_ratio: float = 0.05,
         lr_decay_method: str = "linear",
         grad_clip: float = 1.0,
-        scale_emg_loss: int = 0,
+        scale_emg_loss: float | int = 0,
         device: str | torch.device = "auto",
     ) -> None:
         self.device = device if isinstance(device, torch.device) else resolve_device(str(device))
@@ -216,7 +227,7 @@ class ReactEMGTrainer:
         self.warmup_ratio = float(warmup_ratio)
         self.lr_decay_method = str(lr_decay_method)
         self.grad_clip = float(grad_clip)
-        self.scale_emg_loss = int(scale_emg_loss)
+        self.scale_emg_loss = float(scale_emg_loss)
 
         self.optimizer = AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.scheduler: LambdaLR | None = None
@@ -231,7 +242,7 @@ class ReactEMGTrainer:
         """Run one training epoch weighted by masked EMG and action counts."""
         self.model.train()
         total_loss_sum = 0.0
-        step_count = 0
+        total_weight_sum = 0
         emg_loss_weighted = 0.0
         emg_count_total = 0
         act_loss_weighted = 0.0
@@ -257,8 +268,9 @@ class ReactEMGTrainer:
             if self.scheduler is not None:
                 self.scheduler.step()
 
-            total_loss_sum += float(loss.detach().item())
-            step_count += 1
+            batch_weight = res["total_mask_positions"] if res["total_mask_positions"] > 0 else int(batch[0].size(0))
+            total_loss_sum += float(loss.detach().item()) * batch_weight
+            total_weight_sum += batch_weight
             if res["emg_count"] > 0:
                 emg_loss_weighted += res["emg_loss"] * res["emg_count"]
                 emg_count_total += res["emg_count"]
@@ -268,7 +280,7 @@ class ReactEMGTrainer:
                 act_correct_total += res["action_correct"]
 
         return {
-            "train_loss": total_loss_sum / max(1, step_count),
+            "train_loss": total_loss_sum / max(1, total_weight_sum),
             "train_emg_loss": emg_loss_weighted / max(1, emg_count_total),
             "train_action_loss": act_loss_weighted / max(1, act_count_total),
             "train_action_acc": act_correct_total / max(1, act_count_total),
@@ -279,7 +291,7 @@ class ReactEMGTrainer:
         """Run validation pass weighted accurately by masked token counts."""
         self.model.eval()
         total_loss_sum = 0.0
-        step_count = 0
+        total_weight_sum = 0
         emg_loss_weighted = 0.0
         emg_count_total = 0
         act_loss_weighted = 0.0
@@ -295,8 +307,9 @@ class ReactEMGTrainer:
                     scale_emg_loss=self.scale_emg_loss,
                     num_classes=self.model.num_classes,
                 )
-            total_loss_sum += float(res["loss"].detach().item())
-            step_count += 1
+            batch_weight = res["total_mask_positions"] if res["total_mask_positions"] > 0 else int(batch[0].size(0))
+            total_loss_sum += float(res["loss"].detach().item()) * batch_weight
+            total_weight_sum += batch_weight
             if res["emg_count"] > 0:
                 emg_loss_weighted += res["emg_loss"] * res["emg_count"]
                 emg_count_total += res["emg_count"]
@@ -306,7 +319,7 @@ class ReactEMGTrainer:
                 act_correct_total += res["action_correct"]
 
         return {
-            "val_loss": total_loss_sum / max(1, step_count),
+            "val_loss": total_loss_sum / max(1, total_weight_sum),
             "val_emg_loss": emg_loss_weighted / max(1, emg_count_total),
             "val_action_loss": act_loss_weighted / max(1, act_count_total),
             "val_action_acc": act_correct_total / max(1, act_count_total),
@@ -422,6 +435,17 @@ class ReactEMGTrainer:
             sampler = getattr(train_loader, "sampler", None)
             if sampler is not None and hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(epoch_idx)
+            for ds in (
+                getattr(train_loader, "dataset", None),
+                getattr(val_loader, "dataset", None) if val_loader is not None else None,
+            ):
+                if ds is None:
+                    continue
+                if hasattr(ds, "set_epoch"):
+                    ds.set_epoch(epoch_idx, int(epochs))
+                for sub_ds in getattr(ds, "datasets", ()):
+                    if hasattr(sub_ds, "set_epoch"):
+                        sub_ds.set_epoch(epoch_idx, int(epochs))
 
             train_metrics = self.train_epoch(train_loader)
             if val_loader is not None and len(val_loader) > 0:

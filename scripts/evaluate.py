@@ -54,7 +54,17 @@ def evaluate_from_config(args: argparse.Namespace) -> dict[str, object]:
     val_files: list[Path] = []
     if args.manifest is not None and args.manifest.exists():
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        val_files = [Path(p) for p in manifest.get("splits", {}).get("val", []) if Path(p).exists()]
+        same_sel = (
+            str(manifest.get("dataset_selection", "")).lower()
+            == str(train_cfg.get("dataset_selection", "epn_only")).lower()
+        )
+        same_classes = int(manifest.get("num_classes", -1)) == int(model_cfg.get("num_classes", 6))
+        same_pct = (
+            abs(float(manifest.get("epn_subset_percentage", -1.0)) - float(train_cfg.get("epn_subset_percentage", 1.0)))
+            < 1e-6
+        )
+        if same_sel and same_classes and same_pct:
+            val_files = [Path(p) for p in manifest.get("splits", {}).get("val", []) if Path(p).exists()]
 
     if not val_files:
         splits = discover_reactemg_files(

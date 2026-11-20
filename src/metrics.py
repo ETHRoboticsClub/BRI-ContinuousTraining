@@ -88,8 +88,7 @@ class LookaheadAggregator:
     _last_decision_step: int = field(default=-10_000_000, init=False, repr=False)
     _last_pred: int = field(default=0, init=False, repr=False)
     _last_probs: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32), init=False, repr=False)
-    # Maps global timestep tau -> deque of logits rows from windows ending at tau, tau+1, ..., tau+lookahead
-    _timestep_logits: dict[int, list[np.ndarray]] = field(default_factory=dict, init=False, repr=False)
+    _window_buffer: deque[tuple[int, np.ndarray]] = field(default_factory=deque, init=False, repr=False)
     _completed_history: deque[int] = field(default_factory=lambda: deque(maxlen=4096), init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -101,6 +100,8 @@ class LookaheadAggregator:
             raise ValueError(f"samples_between_prediction must be >= 1, got {self.samples_between_prediction}")
         if self.maj_vote_range not in ("future", "single", "all"):
             raise ValueError(f"Unsupported maj_vote_range {self.maj_vote_range!r}")
+        if self.likelihood_format not in ("probs", "logits", "argmax"):
+            raise ValueError(f"Unsupported likelihood_format {self.likelihood_format!r}")
         self.reset()
 
     def reset(self) -> None:
@@ -108,58 +109,99 @@ class LookaheadAggregator:
         self._last_decision_step = -10_000_000
         self._last_pred = 0
         self._last_probs = np.full(self.num_classes, 1.0 / max(1, self.num_classes), dtype=np.float32)
-        self._timestep_logits.clear()
+        self._window_buffer = deque(maxlen=self.lookahead + self.samples_between_prediction + 4)
         self._completed_history.clear()
 
+    def _aggregate_future_windows(
+        self,
+        target_tau: int,
+        windows: Sequence[tuple[int, np.ndarray]],
+        max_end: int,
+    ) -> tuple[int, np.ndarray] | None:
+        """Aggregate overlapping windows ending in [target_tau, max_end] matching live_inference.py."""
+        weighted_sum: np.ndarray | None = None
+        total_weight = 0.0
+
+        for w_start, arr in windows:
+            win_len = arr.shape[0]
+            w_end = w_start + win_len - 1
+            if w_end < target_tau or w_end > max_end:
+                continue
+
+            offset = target_tau - w_start
+            if offset < 0:
+                offset = 0
+            elif offset >= win_len:
+                continue
+
+            if self.maj_vote_range == "future":
+                chunk_end = min(win_len, target_tau + self.lookahead - w_start + 1)
+                if chunk_end <= offset:
+                    continue
+                relevant_chunk = arr[offset:chunk_end, :]
+            else:
+                relevant_chunk = arr[offset : offset + 1, :]
+
+            if self.likelihood_format == "probs":
+                scores = _softmax(relevant_chunk.astype(np.float64), axis=-1)
+            elif self.likelihood_format == "argmax":
+                cls_ids = np.argmax(relevant_chunk[:, : self.num_classes], axis=-1)
+                scores = np.zeros_like(relevant_chunk, dtype=np.float64)
+                scores[np.arange(len(cls_ids)), cls_ids] = 1.0
+            else:
+                scores = relevant_chunk.astype(np.float64)
+
+            future_distance = w_end - target_tau
+            if self.weighting_method in ("weighted", "linear") and self.lookahead > 0:
+                w_j = 1.0 + (float(self.weight_max_factor) - 1.0) * (float(future_distance) / float(self.lookahead))
+            else:
+                w_j = 1.0
+
+            if weighted_sum is None:
+                weighted_sum = np.zeros(scores.shape[-1], dtype=np.float64)
+            weighted_sum += np.sum(scores, axis=0) * w_j
+            total_weight += float(scores.shape[0]) * w_j
+
+        if weighted_sum is None or total_weight <= 0.0:
+            return None
+
+        avg_scores = weighted_sum / total_weight
+        valid_scores = avg_scores[: self.num_classes]
+        pred = int(np.argmax(valid_scores))
+        if self.likelihood_format == "logits":
+            probs = _softmax(valid_scores, axis=-1).astype(np.float32)
+        else:
+            total = float(np.sum(valid_scores))
+            probs = (valid_scores / max(total, 1e-12)).astype(np.float32)
+        return pred, probs
+
     def push_window_logits(self, logits_wc: np.ndarray, step_increment: int = 1) -> tuple[int, np.ndarray]:
-        """Push logits ``(W, num_classes)`` from window ending at current streaming step.
-
-        Args:
-            logits_wc: Logits matrix of shape ``(window_size, num_classes)`` for the
-                most recent window ending at ``current_step``.
-            step_increment: Sample stride represented by this update (>= 1).
-
-        Returns:
-            Tuple ``(held_pred_class, held_class_probs)`` representing the smoothed
-            look-ahead classification decision held for up to ``samples_between_prediction``.
-        """
+        """Push logits ``(W, C)`` (with C = num_classes or num_classes + 1) from window ending at current step."""
         arr = np.asarray(logits_wc, dtype=np.float32)
-        if arr.shape != (self.window_size, self.num_classes):
-            raise ValueError(f"Expected logits shape ({self.window_size}, {self.num_classes}), got {arr.shape}")
+        if (
+            arr.ndim != 2
+            or arr.shape[0] != self.window_size
+            or arr.shape[1] not in (self.num_classes, self.num_classes + 1)
+        ):
+            raise ValueError(f"Expected logits shape ({self.window_size}, {self.num_classes}[+1]), got {arr.shape}")
 
         end_t = self._current_step
         start_t = end_t - self.window_size + 1
-        # Store logit estimates for recent timesteps needed within the lookahead horizon
-        horizon_start = max(start_t, end_t - self.lookahead - self.samples_between_prediction)
-        for tau in range(horizon_start, end_t + 1):
-            local_idx = tau - start_t
-            self._timestep_logits.setdefault(tau, []).append(arr[local_idx])
+        self._window_buffer.append((start_t, arr))
 
         target_tau = max(start_t, end_t - self.lookahead)
         should_update = (end_t - self._last_decision_step) >= self.samples_between_prediction or (
             self._last_decision_step < 0
         )
 
-        if should_update and target_tau in self._timestep_logits:
-            candidates = self._timestep_logits[target_tau]
-            if self.maj_vote_range == "single":
-                candidates = [candidates[-1]]
-            stacked = np.stack(candidates, axis=0)
-            pred, probs = aggregate_logits(
-                stacked,
-                weighting_method=self.weighting_method,
-                weight_max_factor=self.weight_max_factor,
-                likelihood_format=self.likelihood_format,
-            )
-            self._last_pred = pred
-            self._last_probs = probs
-            self._last_decision_step = end_t
-            self._completed_history.append(pred)
-
-        # Prune entries older than target_tau - samples_between_prediction
-        prune_before = target_tau - self.samples_between_prediction
-        for stale_t in [k for k in self._timestep_logits if k < prune_before]:
-            del self._timestep_logits[stale_t]
+        if should_update:
+            agg_res = self._aggregate_future_windows(target_tau, list(self._window_buffer), max_end=end_t)
+            if agg_res is not None:
+                pred, probs = agg_res
+                self._last_pred = pred
+                self._last_probs = probs
+                self._last_decision_step = end_t
+                self._completed_history.append(pred)
 
         self._current_step += max(1, int(step_increment))
         return self._last_pred, self._last_probs.copy()
@@ -174,15 +216,7 @@ class LookaheadAggregator:
         device: str | torch.device = "cpu",
         pad_initial: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Evaluate ``model`` over a full sequence ``(T, C)`` with smoothed look-ahead.
-
-        Args:
-            pad_initial: If True, prepend ``window_size - 1`` tiled resting samples
-                before index 0 so online predictions cover ``0..T-1`` cleanly.
-
-        Returns:
-            Tuple ``(preds_t, probs_tc)`` aligned to timesteps ``0..T-1``.
-        """
+        """Evaluate ``model`` over a full sequence ``(T, C)`` with smoothed look-ahead."""
         raw_seq = np.asarray(emg_tc, dtype=np.float32)
         orig_len = len(raw_seq)
         pad_len = self.window_size - 1 if pad_initial and orig_len > 0 else 0
@@ -194,7 +228,7 @@ class LookaheadAggregator:
         else:
             seq = raw_seq
 
-        t_len, channels = seq.shape
+        t_len, _channels = seq.shape
         preds = np.full(t_len, -1, dtype=np.int64)
         probs_seq = np.full((t_len, self.num_classes), 1.0 / self.num_classes, dtype=np.float32)
         if t_len < self.window_size:
@@ -213,55 +247,54 @@ class LookaheadAggregator:
             chunk_starts = starts[b_start : b_start + max(1, int(batch_size))]
             windows = np.stack([seq[s : s + self.window_size] for s in chunk_starts], axis=0)
             emg_tensor = torch.from_numpy(windows).to(dev)
-            if hasattr(model, "predict_action_logits") and callable(model.predict_action_logits):
+            mask_actions = torch.full(
+                (len(chunk_starts), self.window_size), self.num_classes, dtype=torch.long, device=dev
+            )
+            task_idx = torch.zeros(len(chunk_starts), dtype=torch.long, device=dev)
+            mask_pos_emg = torch.zeros_like(emg_tensor, dtype=torch.bool)
+            if (
+                hasattr(model, "predict_action_logits")
+                and callable(model.predict_action_logits)
+                and self.likelihood_format == "logits"
+            ):
                 class_logits_t = model.predict_action_logits(emg_tensor)
             else:
-                mask_actions = torch.full(
-                    (len(chunk_starts), self.window_size), self.num_classes, dtype=torch.long, device=dev
-                )
-                task_idx = torch.zeros(len(chunk_starts), dtype=torch.long, device=dev)
-                mask_pos_emg = torch.zeros_like(emg_tensor, dtype=torch.bool)
-                _, act_logits = model(emg_tensor, mask_actions, task_idx, mask_pos_emg)
-                class_logits_t = act_logits[:, :, : self.num_classes]
-            class_logits = class_logits_t.detach().cpu().numpy()
-            all_logits.append(class_logits)
+                try:
+                    _, act_logits = model(emg_tensor, mask_actions, task_idx, mask_pos_emg)
+                    class_logits_t = act_logits
+                except TypeError:
+                    class_logits_t = model.predict_action_logits(emg_tensor)
+            all_logits.append(class_logits_t.detach().cpu().numpy())
 
-        window_logits = np.concatenate(all_logits, axis=0)  # (N_win, W, num_classes)
+        window_logits = np.concatenate(all_logits, axis=0)  # (N_win, W, C[+1])
+        win_pairs = [(int(starts[idx]), window_logits[idx]) for idx in range(len(starts))]
 
-        # Accumulate logits per timestep tau covered by each window ending at e = s + W - 1
-        per_t_buckets: list[list[np.ndarray]] = [[] for _ in range(t_len)]
-        per_t_single: list[np.ndarray | None] = [None] * t_len
-        for idx, s in enumerate(starts):
-            end_t = s + self.window_size - 1
-            for tau in range(s, end_t + 1):
-                # Only use windows whose end index does not exceed tau + lookahead
-                if end_t <= tau + self.lookahead:
-                    local_pos = tau - s
-                    logit_vec = window_logits[idx, local_pos]
-                    per_t_buckets[tau].append(logit_vec)
-                    if end_t == tau + self.lookahead or (end_t <= tau + self.lookahead and per_t_single[tau] is None):
-                        per_t_single[tau] = logit_vec
-
-        # Determine predicted decision at timesteps from first covered sample to end
         first_covered = starts[0] + self.window_size - 1
         decision_pred: int | None = None
         decision_probs: np.ndarray | None = None
         next_update_t = first_covered
+        win_cursor_left = 0
+        win_cursor_right = 0
 
         for cur_t in range(first_covered, t_len):
             target_tau = max(0, cur_t - self.lookahead)
+            max_end = target_tau + self.lookahead
+            while (
+                win_cursor_left < len(win_pairs) and (win_pairs[win_cursor_left][0] + self.window_size - 1) < target_tau
+            ):
+                win_cursor_left += 1
+            while (
+                win_cursor_right < len(win_pairs) and (win_pairs[win_cursor_right][0] + self.window_size - 1) <= max_end
+            ):
+                win_cursor_right += 1
+
             if cur_t >= next_update_t or decision_pred is None:
-                bucket = per_t_buckets[target_tau]
-                if self.maj_vote_range == "single" and per_t_single[target_tau] is not None:
-                    bucket = [per_t_single[target_tau]]  # type: ignore[list-item]
-                if bucket:
-                    stacked = np.stack(bucket, axis=0)
-                    decision_pred, decision_probs = aggregate_logits(
-                        stacked,
-                        weighting_method=self.weighting_method,
-                        weight_max_factor=self.weight_max_factor,
-                        likelihood_format=self.likelihood_format,
-                    )
+                active_windows = win_pairs[win_cursor_left:win_cursor_right]
+                if not active_windows and starts[0] == 0 and target_tau < self.window_size:
+                    active_windows = [win_pairs[0]]
+                agg_res = self._aggregate_future_windows(target_tau, active_windows, max_end=max_end)
+                if agg_res is not None:
+                    decision_pred, decision_probs = agg_res
                     next_update_t = cur_t + self.samples_between_prediction
             if decision_pred is not None and decision_probs is not None:
                 preds[cur_t] = decision_pred

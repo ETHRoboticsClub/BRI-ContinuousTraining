@@ -40,10 +40,22 @@ def _load_splits(cfg: dict, seed: int, manifest_path: Path | None) -> dict[str, 
 
     if manifest_path is not None and manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        splits = manifest.get("splits", {})
-        resolved = {k: [Path(p) for p in splits.get(k, []) if Path(p).exists()] for k in ("train", "val", "unlabeled")}
-        if resolved["train"]:
-            return resolved
+        same_sel = (
+            str(manifest.get("dataset_selection", "")).lower()
+            == str(train_cfg.get("dataset_selection", "epn_only")).lower()
+        )
+        same_classes = int(manifest.get("num_classes", -1)) == int(model_cfg.get("num_classes", 6))
+        same_pct = (
+            abs(float(manifest.get("epn_subset_percentage", -1.0)) - float(train_cfg.get("epn_subset_percentage", 1.0)))
+            < 1e-6
+        )
+        if same_sel and same_classes and same_pct:
+            splits = manifest.get("splits", {})
+            resolved = {
+                k: [Path(p) for p in splits.get(k, []) if Path(p).exists()] for k in ("train", "val", "unlabeled")
+            }
+            if resolved["train"]:
+                return resolved
 
     data_root = _resolve_path(train_cfg.get("data_root", "data/raw/reactemg"))
     return discover_reactemg_files(
@@ -93,6 +105,9 @@ def train_from_config(args: argparse.Namespace) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     splits = _load_splits(cfg, seed=seed, manifest_path=args.manifest)
+    max_files = train_cfg.get("max_files")
+    if max_files is not None and int(max_files) > 0:
+        splits["train"] = splits["train"][: int(max_files)]
     if not splits["train"]:
         raise RuntimeError(
             f"No training files found under {_resolve_path(train_cfg.get('data_root', 'data/raw/reactemg'))}. "
@@ -112,6 +127,12 @@ def train_from_config(args: argparse.Namespace) -> Path:
     num_classes = int(model_cfg.get("num_classes", 6))
     window_size = int(model_cfg.get("window_size", 600))
     task_selection = [int(t) for t in train_cfg.get("task_selection", [0, 1, 2])]
+    noise_amp = float(train_cfg.get("noise_std", train_cfg.get("noise", 0.0)))
+    with_curr = bool(train_cfg.get("with_training_curriculum", False))
+    emb_method = str(model_cfg.get("embedding_method", "linear_projection"))
+    stage_1_w = tuple(float(x) for x in train_cfg.get("stage_1_weights", [0.5, 0.5]))
+    stage_2_w = tuple(float(x) for x in train_cfg.get("stage_2_weights", [0.01, 0.99]))
+    trans_buf = int(train_cfg.get("transition_buffer", 50))
 
     labeled_train_ds = ReactEMGDataset(
         file_paths=splits["train"],
@@ -126,8 +147,12 @@ def train_from_config(args: argparse.Namespace) -> Path:
         sampling_probability_poisson=float(train_cfg.get("sampling_probability_poisson", 0.99)),
         poisson_mask_range=tuple(train_cfg.get("poisson_mask_range", [0.3, 0.75])),
         end_mask_range=tuple(train_cfg.get("end_mask_range", [0.3, 0.6])),
-        transition_buffer=int(train_cfg.get("transition_buffer", 30)),
-        noise=float(train_cfg.get("noise", 0.0)),
+        transition_buffer=trans_buf,
+        stage_1_weights=stage_1_w,
+        stage_2_weights=stage_2_w,
+        with_training_curriculum=with_curr,
+        embedding_method=emb_method,
+        noise=noise_amp,
         is_unlabeled=False,
         deterministic=False,
         seed=seed,
@@ -146,6 +171,9 @@ def train_from_config(args: argparse.Namespace) -> Path:
             mask_alignment=str(model_cfg.get("mask_alignment", "aligned")),
             lambda_poisson=float(train_cfg.get("lambda_poisson", 7.0)),
             poisson_mask_range=tuple(train_cfg.get("poisson_mask_range", [0.3, 0.75])),
+            transition_buffer=trans_buf,
+            with_training_curriculum=with_curr,
+            embedding_method=emb_method,
             is_unlabeled=True,
             deterministic=False,
             seed=seed,
@@ -177,6 +205,11 @@ def train_from_config(args: argparse.Namespace) -> Path:
             lambda_poisson=float(train_cfg.get("lambda_poisson", 7.0)),
             sampling_probability_poisson=1.0,
             poisson_mask_range=tuple(train_cfg.get("poisson_mask_range", [0.3, 0.75])),
+            transition_buffer=trans_buf,
+            stage_1_weights=stage_1_w,
+            stage_2_weights=stage_2_w,
+            with_training_curriculum=with_curr,
+            embedding_method=emb_method,
             is_unlabeled=False,
             deterministic=True,
             seed=seed,
@@ -195,7 +228,7 @@ def train_from_config(args: argparse.Namespace) -> Path:
             activation=str(model_cfg.get("activation", "gelu")),
             num_layers=int(model_cfg.get("num_layers", 2)),
             window_size=window_size,
-            embedding_method=str(model_cfg.get("embedding_method", "linear_projection")),
+            embedding_method=emb_method,
             mask_alignment=str(model_cfg.get("mask_alignment", "aligned")),
             share_pe=bool(model_cfg.get("share_pe", True)),
             tie_weight=bool(model_cfg.get("tie_weight", False)),
@@ -206,14 +239,15 @@ def train_from_config(args: argparse.Namespace) -> Path:
             channels=channels,
         )
 
+    use_warmup = bool(train_cfg.get("use_warmup_and_decay", True))
     trainer = ReactEMGTrainer(
         model=model,
         lr=float(train_cfg.get("lr", 1e-4)),
         weight_decay=float(train_cfg.get("weight_decay", 0.01)),
-        warmup_ratio=float(train_cfg.get("warmup_ratio", 0.05)),
+        warmup_ratio=float(train_cfg.get("warmup_ratio", 0.05)) if use_warmup else 0.0,
         lr_decay_method=str(train_cfg.get("lr_decay_method", "linear")),
         grad_clip=float(train_cfg.get("grad_clip", 1.0)),
-        scale_emg_loss=int(train_cfg.get("scale_emg_loss", 0)),
+        scale_emg_loss=float(train_cfg.get("scale_emg_loss", 0)),
         device=device,
     )
 
