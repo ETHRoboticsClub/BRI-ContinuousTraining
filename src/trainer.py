@@ -4,6 +4,23 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from src.model.kernelized import Kernelized
+
+
+def param_groups(model, lr: float, weight_decay: float, ssm_lr_scale: float = 1.0, ssm_decay_A: bool = True) -> list:
+    """AdamW parameter groups. The SSM dynamics (A and log_dt of every Kernelized layer) train at lr * ssm_lr_scale,
+    and A is left out of weight decay if not ssm_decay_A. Parameters with equal settings share a group."""
+    if ssm_lr_scale <= 0:
+        raise ValueError(f"ssm_lr_scale must be > 0, got {ssm_lr_scale}")
+    ssm = [m for m in model.modules() if isinstance(m, Kernelized)]
+    dynamics = {id(p) for m in ssm for p in (m.A, m.log_dt)}
+    no_decay = set() if ssm_decay_A else {id(m.A) for m in ssm}
+    groups = {}
+    for p in model.parameters():
+        key = (lr * ssm_lr_scale if id(p) in dynamics else lr, 0.0 if id(p) in no_decay else weight_decay)
+        groups.setdefault(key, []).append(p)
+    return [{"params": ps, "lr": g_lr, "weight_decay": g_wd} for (g_lr, g_wd), ps in groups.items()]
+
 
 def train_epoch(model, loader, loss_fn, optimizer, device, grad_clip=None) -> float:
     """One pass over loader; returns the mean training loss."""
@@ -22,7 +39,7 @@ def train_epoch(model, loader, loss_fn, optimizer, device, grad_clip=None) -> fl
 
 @torch.no_grad()
 def evaluate(model, loader, device) -> dict:
-    """Mean squared error and R² averaged over targets."""
+    """Mean squared error, R², NMSE and MAE (degrees) averaged over targets."""
     model.eval()
     y, pred = [], []
     for xb, yb in loader:
@@ -30,7 +47,13 @@ def evaluate(model, loader, device) -> dict:
         y.append(yb)
     y, pred = torch.cat(y), torch.cat(pred)
     mse = ((pred - y) ** 2).mean(0)
-    return {"mse": mse.mean().item(), "r2": (1 - mse / y.var(0, unbiased=False)).mean().item()}
+    nmse = mse / y.var(0, unbiased=False)
+    return {
+        "mse": mse.mean().item(),
+        "r2": (1 - nmse).mean().item(),
+        "nmse": nmse.mean().item(),
+        "mae": (pred - y).abs().mean().item(),
+    }
 
 
 def fit(model, train_loader, val_loader, loss_fn, optimizer, scheduler, epochs, device, checkpoint, grad_clip=None):
@@ -40,8 +63,19 @@ def fit(model, train_loader, val_loader, loss_fn, optimizer, scheduler, epochs, 
         train_loss = train_epoch(model, train_loader, loss_fn, optimizer, device, grad_clip)
         scheduler.step()
         val = evaluate(model, val_loader, device)
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_mse": val["mse"], "val_r2": val["r2"]})
-        print(f"[{epoch:03d}] train loss {train_loss:.4f} | val mse {val['mse']:.4f} r2 {val['r2']:.4f}")
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_mse": val["mse"],
+                "val_r2": val["r2"],
+                "val_mae": val["mae"],
+            }
+        )
+        print(
+            f"[{epoch:03d}] train loss {train_loss:.4f} | "
+            f"val mse {val['mse']:.4f} r2 {val['r2']:.4f} mae {val['mae']:.4f}"
+        )
         if best is None or val["r2"] > best["r2"]:
             best = val
             torch.save(model.state_dict(), checkpoint)

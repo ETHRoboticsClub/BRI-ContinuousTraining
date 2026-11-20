@@ -7,9 +7,20 @@ train:
   val_subjects: [19]
   test_subjects: [20]
   epochs: 15
+  k: 5                    # kernel-training example = k stateful inputs (capped by the shortest recording)
+  example_stride: 40      # raw samples between training examples
+  activation: tanh        # tanh or relu
+  normalization: subject  # EMG z-score: none, subject or set (pooled over each set's subjects)
+  aug_gain: 0.0           # training examples only: std of the log per-channel gain; 0 = off
+  aug_rotate: 0           # training examples only: max rotation around the electrode ring, whole electrodes; 0 = off
+  aug_shift: 0.0          # training examples only: max fractional shift around the ring, electrodes; 0 = off
+  downsample: 1           # keep every s-th tangent step after the first SSM layer; power of 2 dividing the kernel length
+  ssm_speed: 4            # Kernelized `speed` of both SSM layers: initial dt = speed / (L - 1) x [1 .. 8]
   batch_size: 256
   lr: 0.0002
   weight_decay: 0.0001
+  ssm_lr_scale: 1.0       # LR multiplier for the SSM dynamics (A, log_dt)
+  ssm_decay_A: true       # false: no weight decay on A
   grad_clip: 1.0
-  seed: 0
+  seeds: [0, 1, 2]
   device: cuda
