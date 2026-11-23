@@ -1,22 +1,19 @@
-"""Unit tests for WaveFormer preprocessing, dataset discovery, windowing, and legacy compat."""
+"""Unit tests for WaveFormer preprocessing, dataset discovery, and windowing."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 
 from src.dataset import (
     CLASS_NAMES_6,
-    LabeledUnlabeledSampler,
-    ReactEMGDataset,
     WaveFormerDataset,
     discover_reactemg_files,
     load_reactemg_file,
 )
-from src.preprocess import LEFT_HAND_REMAP, Preprocess, WaveFormerPreprocess, preprocess_waveformer_window
+from src.preprocess import LEFT_HAND_REMAP, WaveFormerPreprocess, preprocess_waveformer_window
 
 
 def test_waveformer_preprocess_signed_bipolar_and_dc_removal() -> None:
@@ -42,16 +39,6 @@ def test_waveformer_preprocess_signed_bipolar_and_dc_removal() -> None:
     # Return NCHW (1, C, T) when requested (preserving channel-first orientation)
     nchw = preprocess_waveformer_window(raw.T, return_nchw=True)
     assert nchw.shape == (1, 8, 40)
-
-
-def test_legacy_reactemg_preprocess_preserved() -> None:
-    raw = np.zeros((25, 8), dtype=np.float32)
-    raw[:, 0] = -64.0
-    raw[5, 1] = 120.0
-    prep_rect = Preprocess(hand_choice="right", mode="reactemg", median_filter_size=3, medfilt_order="before_rec")
-    out_r = prep_rect.preprocess_sequence(raw)
-    assert np.isclose(out_r[10, 0], 64.0 / 128.0, atol=1e-5)
-    assert np.isclose(out_r[5, 1], 0.0, atol=1e-5)
 
 
 def test_csv_npy_loading_and_subject_disjoint_epn_discovery(tmp_path: Path) -> None:
@@ -108,15 +95,3 @@ def test_waveformer_dataset_window_extraction_and_augmentation(tmp_path: Path) -
     ds_val = WaveFormerDataset(files, window_size=100, channels=8, num_classes=6, train=False, seed=7)
     x_val, _ = ds_val[0]
     assert abs(float(x_val.mean().item())) < 1e-3
-
-
-def test_legacy_reactemg_dataset_compat(tmp_path: Path) -> None:
-    p = tmp_path / "seq.csv"
-    gt = np.concatenate([np.zeros(60, dtype=np.int64), np.full(60, 5, dtype=np.int64)])
-    df = pd.DataFrame({"gt": gt, **{f"emg_{c}": np.full(120, 64, dtype=np.int64) for c in range(8)}})
-    df.to_csv(p, index=False)
-
-    ds = ReactEMGDataset([p], window_size=120, stride=10, num_classes=6, task_selection=(0, 3), deterministic=True)
-    assert len(ds) == 2
-    sampler = LabeledUnlabeledSampler(ds, seed=5)
-    assert len(list(iter(sampler))) == 2

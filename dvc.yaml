@@ -13,16 +13,14 @@ stages:
           - train.dataset_selection
           - train.epn_subset_percentage
     outs:
-      - data/processed/reactemg
+      - data/processed/waveformer
 
   train:
     cmd: python scripts/train.py
     deps:
-      - data/processed/reactemg
+      - data/processed/waveformer
       - scripts/train.py
       - src/dataset.py
-      - src/masking.py
-      - src/metrics.py
       - src/model
       - src/preprocess.py
       - src/trainer.py
@@ -39,7 +37,6 @@ stages:
     deps:
       - output/best_model.pt
       - scripts/evaluate.py
-      - src/metrics.py
       - src/dataset.py
       - src/model
     params:

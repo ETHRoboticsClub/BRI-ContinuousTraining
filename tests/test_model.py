@@ -1,4 +1,4 @@
-"""Unit tests for WaveFormer 6-class architecture (and legacy Any2Any_Model compatibility)."""
+"""Unit tests for WaveFormer 6-class architecture."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from src.model.model import Any2Any_Model, Model, WaveFormer, Waveformer_base, build_model_from_config
+from src.model.model import Model, WaveFormer, Waveformer_base, build_model_from_config
 from src.trainer import load_waveformer_checkpoint, save_waveformer_checkpoint
 
 
@@ -74,12 +74,3 @@ def test_waveformer_checkpoint_roundtrip(tmp_path: Path) -> None:
     x = torch.randn(2, 1, 8, 100)
     with torch.no_grad():
         torch.testing.assert_close(model(x), loaded(x), atol=1e-6, rtol=1e-6)
-
-
-def test_legacy_any2any_model_still_works() -> None:
-    model = Any2Any_Model(num_classes=6, window_size=120, channels=8, embedding_dim=32, nhead=4, num_layers=1)
-    model.eval()
-    emg = torch.rand(1, 120, 8, dtype=torch.float32)
-    with torch.no_grad():
-        logits = model.predict_action_logits(emg)
-    assert logits.shape == (1, 120, 6)
