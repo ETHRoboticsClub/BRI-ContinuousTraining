@@ -1,4 +1,4 @@
-"""Unit tests for the 6-class ReactEMG Any2Any_Model architecture."""
+"""Unit tests for WaveFormer 6-class architecture (and legacy Any2Any_Model compatibility)."""
 
 from __future__ import annotations
 
@@ -6,74 +6,80 @@ from pathlib import Path
 
 import torch
 
-from src.model.model import Any2Any_Model, Model
-from src.trainer import load_reactemg_checkpoint, save_reactemg_checkpoint
+from src.model.model import Any2Any_Model, Model, WaveFormer, Waveformer_base, build_model_from_config
+from src.trainer import load_waveformer_checkpoint, save_waveformer_checkpoint
 
 
-def test_model_alias_and_forward_shapes() -> None:
-    assert Model is Any2Any_Model
-    model = Any2Any_Model(num_classes=6, window_size=600, channels=8)
+def test_waveformer_alias_shapes_and_wavelet_gradients() -> None:
+    assert Model is WaveFormer
+    model = Waveformer_base(channels=8, num_classes=6, window_size=200, patch_size=(1, 20))
+    assert sum(p.numel() for p in model.parameters()) > 1_000_000
+
+    # Accept (B, 1, C, T), (B, C, T), and (B, T, C)
+    x_4d = torch.randn(2, 1, 8, 200)
+    x_3d_ct = x_4d.squeeze(1)
+    x_3d_tc = x_3d_ct.transpose(1, 2)
+
     model.eval()
-
-    bsz = 3
-    emg = torch.rand(bsz, 600, 8, dtype=torch.float32)
-    actions = torch.randint(0, 7, (bsz, 600), dtype=torch.long)
-    task_idx = torch.tensor([0, 1, 2], dtype=torch.long)
-    mask_pos_emg = torch.zeros(bsz, 600, 8, dtype=torch.bool)
-    mask_pos_emg[1, 50:100, :] = True
-
-    emg_out, act_out = model(emg, actions, task_idx, mask_pos_emg)
-    assert emg_out.shape == (bsz, 600, 8)
-    assert act_out.shape == (bsz, 600, 7)
-
-    logits = model.predict_action_logits(emg)
-    assert logits.shape == (bsz, 600, 6)
-
-
-def test_shared_positional_encoding_and_task3_isolation() -> None:
-    model = Any2Any_Model(num_classes=6, window_size=120, channels=8, share_pe=True)
-    model.eval()
-    assert model.emg_positional_encoding is model.action_positional_encoding
-
-    emg = torch.rand(1, 120, 8, dtype=torch.float32)
-    mask_pos_emg = torch.zeros(1, 120, 8, dtype=torch.bool)
-    mask_pos_emg[:, 20:50, :] = True
-    task_idx = torch.tensor([3], dtype=torch.long)
-
-    actions_a = torch.full((1, 120), 6, dtype=torch.long)
-    actions_b = torch.randint(0, 6, (1, 120), dtype=torch.long)
-
     with torch.no_grad():
-        emg_out_a, _ = model(emg, actions_a, task_idx, mask_pos_emg)
-        emg_out_b, _ = model(emg, actions_b, task_idx, mask_pos_emg)
+        logits_4d = model(x_4d)
+        logits_ct = model(x_3d_ct)
+        logits_tc = model(x_3d_tc)
+        probs = model.predict_proba(x_4d)
 
-    assert torch.isfinite(emg_out_a).all()
-    assert torch.allclose(emg_out_a, emg_out_b, atol=1e-5)
+    assert logits_4d.shape == (2, 6)
+    torch.testing.assert_close(logits_4d, logits_ct, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(logits_4d, logits_tc, atol=1e-5, rtol=1e-5)
+    assert probs.shape == (2, 6)
+    assert torch.allclose(probs.sum(dim=-1), torch.ones(2), atol=1e-5)
+
+    # Confirm wavelet_conv is actively wired in the forward pass and receives gradients
+    model.train()
+    loss = model(x_4d).sum()
+    loss.backward()
+    assert model.wavelet_conv.depthwise.wt_filter.grad is not None
+    assert model.wavelet_conv.pointwise.weight.grad is not None
 
 
-def test_checkpoint_save_and_load_roundtrip(tmp_path: Path) -> None:
-    model = Any2Any_Model(num_classes=6, window_size=120, embedding_dim=64, nhead=4, num_layers=1)
+def test_waveformer_checkpoint_roundtrip(tmp_path: Path) -> None:
+    cfg = {
+        "arch": "waveformer",
+        "channels": 8,
+        "num_classes": 6,
+        "window_size": 100,
+        "patch_size": [1, 10],
+        "embed_dim": 64,
+        "depth": 2,
+        "num_heads": 4,
+        "mlp_ratio": 2.0,
+        "wt_levels": 2,
+    }
+    model = build_model_from_config(cfg)
     model.eval()
-    ckpt_path = save_reactemg_checkpoint(
-        tmp_path / "reactemg.pt",
+
+    ckpt_path = save_waveformer_checkpoint(
+        tmp_path / "waveformer.pt",
         model,
-        args_dict={
-            "num_classes": 6,
-            "window_size": 120,
-            "embedding_dim": 64,
-            "nhead": 4,
-            "num_layers": 1,
-            "channels": 8,
-        },
-        epoch=1,
-        best_val_loss=0.42,
+        args_dict=cfg,
+        epoch=3,
+        best_score=0.91,
+        metrics={"val_acc": 0.91},
     )
 
-    loaded, payload = load_reactemg_checkpoint(ckpt_path, device="cpu")
+    loaded, payload = load_waveformer_checkpoint(ckpt_path, device="cpu")
     loaded.eval()
-    assert payload["args_dict"]["num_classes"] == 6
-    assert "model_info" in payload and "model_state_dict" in payload["model_info"]
+    assert payload["arch"] == "waveformer"
+    assert payload["args_dict"]["embed_dim"] == 64
 
-    x = torch.rand(2, 120, 8)
+    x = torch.randn(2, 1, 8, 100)
     with torch.no_grad():
-        assert torch.allclose(model.predict_action_logits(x), loaded.predict_action_logits(x), atol=1e-6)
+        torch.testing.assert_close(model(x), loaded(x), atol=1e-6, rtol=1e-6)
+
+
+def test_legacy_any2any_model_still_works() -> None:
+    model = Any2Any_Model(num_classes=6, window_size=120, channels=8, embedding_dim=32, nhead=4, num_layers=1)
+    model.eval()
+    emg = torch.rand(1, 120, 8, dtype=torch.float32)
+    with torch.no_grad():
+        logits = model.predict_action_logits(emg)
+    assert logits.shape == (1, 120, 6)

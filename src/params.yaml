@@ -1,65 +1,54 @@
 preprocessing:
+  mode: "waveformer"            # "waveformer" (signed bipolar sEMG / 128 + DC removal)
   fs: 200                       # Sampling rate in Hz
   channels: 8                   # Myo armband sEMG channels
-  median_filter_size: 3         # Kernel size for 1D temporal median filter
-  medfilt_order: "before_rec"   # "before_rec" (paper default) or "after_rec"
-  scale_divisor: 128.0          # Scales rectified int8 Myo [-128, 127] -> [0, 1]
+  scale_divisor: 128.0          # Scales signed int8 Myo [-128, 127] -> [-1, 1]
   hand_choice: "right"          # "right" or "left" (remaps [6,5,4,3,2,1,0,7])
+  remove_dc: true               # Zero-mean per window while preserving contraction RMS
+  median_filter_size: 3         # Legacy compatibility
+  medfilt_order: "before_rec"
 
 model:
-  num_classes: 6                # 0:Relax, 1:Open, 2:Close, 3:Wave-In, 4:Wave-Out, 5:Pinch (6:<MASK>)
-  window_size: 600              # 3.0 s context window at 200 Hz
-  embedding_dim: 128
-  nhead: 4
-  num_layers: 2
-  dropout: 0.15
-  activation: "gelu"
-  embedding_method: "linear_projection"
-  mask_alignment: "aligned"
-  share_pe: true
-  tie_weight: false
-  use_input_layernorm: true
-  output_reduction_method: "none"
-  chunk_size: 0
+  arch: "waveformer"
+  num_classes: 6                # 0:Relax, 1:Open, 2:Close, 3:Wave-In, 4:Wave-Out, 5:Pinch
+  channels: 8
+  input_channels: 1
+  window_size: 200              # 1.0 s window at 200 Hz (WaveFormer 200 Hz Myo config)
+  patch_size: [1, 20]           # 8 x 10 = 80 tokens (+ 1 [CLS] = 81 tokens)
+  embed_dim: 256
+  depth: 6
+  num_heads: 8
+  mlp_ratio: 2.0                # ~3.2M total params (matches WaveFormer paper ~3.1M)
+  wt_levels: 3                  # 3-level 2D Haar (db1) wavelet conv
+  wt_type: "db1"
+  wt_kernel_size: 3
+  highfreq_dropout: 0.1
+  dropout: 0.1
+  drop_path: 0.1
 
 train:
   data_root: "data/raw/reactemg"
-  dataset_selection: "epn_only" # 6-class training on EMG-EPN-612 (all 6 gestures)
-  epn_subset_percentage: 0.12
+  cache_dir: "data/processed/waveformer"
+  dataset_selection: "epn_only" # 6-class EMG-EPN-612 (all 6 gestures across subjects)
+  epn_subset_percentage: 0.25   # ~77 subjects (subject-disjoint train/val split)
   max_files: null
-  window_stride: 30             # 150 ms sliding stride across 5 s trials
-  task_selection: [0, 1, 2]     # 0=action_rec, 1=emg_rec, 2=joint_rec, 3=unlabeled_emg
-  lambda_poisson: 7.0
-  sampling_probability_poisson: 0.99
-  poisson_mask_range: [0.3, 0.75]
-  end_mask_range: [0.3, 0.6]
-  transition_buffer: 50
-  stage_1_weights: [0.5, 0.5]
-  stage_2_weights: [0.01, 0.99]
-  with_training_curriculum: false
-  use_warmup_and_decay: true
-  scale_emg_loss: 0             # 0: L_emg + L_act (paper default), 1: 100*L_emg + L_act
-  noise_std: 0.0
+  window_stride: 40
+  rescaling_range: [0.55, 1.80] # Amplitude robustness across Myo fit/strength
+  jitter_sigma: 0.004
   batch_size: 256
-  epochs: 12
-  lr: 0.0003
+  epochs: 16
+  lr: 0.0005
+  min_lr: 0.000001
   weight_decay: 0.01
-  warmup_ratio: 0.05
-  lr_decay_method: "linear"     # "linear", "cosine", or "exponential"
+  warmup_epochs: 3
+  label_smoothing: 0.05
   grad_clip: 1.0
-  saved_checkpoint_pth: null    # Train from scratch by default
-  val_split_ratio: 0.05         # 5% held-out files for pub_with_epn / epn_only validation
+  saved_checkpoint_pth: null
+  val_split_ratio: 0.10         # 10% unseen subjects held out for validation
   seeds: [42]
   device: "cuda"
 
 eval:
-  buffer_range: 200             # +-0.5 s reaction buffer (200 samples @ 200 Hz)
-  lookahead: 50                 # Smoothed look-ahead mode: 50 samples (0.25 s)
-  samples_between_prediction: 20 # Hold period s = 20 samples (10 Hz)
-  stride: 5
-  maj_vote_range: "future"
-  likelihood_format: "probs"
-  weight_max_factor: 1.5
-  weighting_method: "equal"
-  allow_relax: 0
-  strict_transition: 0
+  window_size: 200
+  step_size: 20                 # 10 Hz streaming evaluation cadence
+  max_files: 600

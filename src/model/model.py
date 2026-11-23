@@ -1,9 +1,21 @@
-"""ReactEMG (Any2Any) encoder-only multimodal Transformer model."""
+"""Primary EMG classifier model exports (WaveFormer default + legacy ReactEMG Any2Any_Model)."""
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 from torch import nn
+
+from src.model.waveformer import WaveFormer, Waveformer_base
+
+__all__ = [
+    "Any2Any_Model",
+    "Model",
+    "WaveFormer",
+    "Waveformer_base",
+    "build_model_from_config",
+]
 
 
 class Any2Any_Model(nn.Module):
@@ -205,4 +217,47 @@ class Any2Any_Model(nn.Module):
         return action_logits[..., : self.num_classes]
 
 
-Model = Any2Any_Model
+def build_model_from_config(model_cfg: dict[str, Any], channels: int = 8) -> nn.Module:
+    """Instantiate WaveFormer (default) or legacy Any2Any_Model from a config dictionary."""
+    arch = str(model_cfg.get("arch", "waveformer")).lower()
+    if arch in ("reactemg", "any2any"):
+        return Any2Any_Model(
+            embedding_dim=int(model_cfg.get("embedding_dim", 128)),
+            nhead=int(model_cfg.get("nhead", 4)),
+            dropout=float(model_cfg.get("dropout", 0.15)),
+            activation=str(model_cfg.get("activation", "gelu")),
+            num_layers=int(model_cfg.get("num_layers", 2)),
+            window_size=int(model_cfg.get("window_size", 600)),
+            embedding_method=str(model_cfg.get("embedding_method", "linear_projection")),
+            mask_alignment=str(model_cfg.get("mask_alignment", "aligned")),
+            share_pe=bool(model_cfg.get("share_pe", True)),
+            tie_weight=bool(model_cfg.get("tie_weight", False)),
+            use_input_layernorm=bool(model_cfg.get("use_input_layernorm", True)),
+            num_classes=int(model_cfg.get("num_classes", 6)),
+            output_reduction_method=str(model_cfg.get("output_reduction_method", "none")),
+            chunk_size=int(model_cfg.get("chunk_size", 0)),
+            channels=int(model_cfg.get("channels", channels)),
+        )
+
+    patch_raw = model_cfg.get("patch_size", [1, 20])
+    patch_size = (int(patch_raw[0]), int(patch_raw[1]))
+    return WaveFormer(
+        channels=int(model_cfg.get("channels", channels)),
+        num_classes=int(model_cfg.get("num_classes", 6)),
+        window_size=int(model_cfg.get("window_size", 200)),
+        patch_size=patch_size,
+        input_channels=int(model_cfg.get("input_channels", 1)),
+        embed_dim=int(model_cfg.get("embed_dim", 256)),
+        depth=int(model_cfg.get("depth", 6)),
+        num_heads=int(model_cfg.get("num_heads", 8)),
+        mlp_ratio=float(model_cfg.get("mlp_ratio", 2.0)),
+        wt_levels=int(model_cfg.get("wt_levels", 3)),
+        wt_type=str(model_cfg.get("wt_type", "db1")),
+        wt_kernel_size=int(model_cfg.get("wt_kernel_size", 3)),
+        highfreq_dropout=float(model_cfg.get("highfreq_dropout", 0.1)),
+        dropout=float(model_cfg.get("dropout", 0.1)),
+        drop_path=float(model_cfg.get("drop_path", 0.1)),
+    )
+
+
+Model = WaveFormer

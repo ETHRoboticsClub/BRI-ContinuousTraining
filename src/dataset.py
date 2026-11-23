@@ -1,8 +1,10 @@
-"""ReactEMG dataset discovery, loading, windowing, and dynamic masking."""
+"""WaveFormer (and legacy ReactEMG) sEMG dataset discovery, loading, windowing, and augmentations."""
 
 from __future__ import annotations
 
+import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -13,7 +15,7 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from src.masking import masking_a2a
-from src.preprocess import Preprocess
+from src.preprocess import Preprocess, preprocess_waveformer_window
 
 CLASS_NAMES_6: tuple[str, ...] = (
     "Relax",
@@ -33,7 +35,7 @@ _EPN_3CLASS_KEYWORDS: tuple[str, ...] = ("relax", "open", "fist", "close")
 
 
 def _extract_emg_and_gt_from_csv(path: Path, channels: int) -> tuple[np.ndarray, np.ndarray]:
-    """Load raw EMG channels and ground-truth labels from a ReactEMG CSV file."""
+    """Load raw EMG channels and ground-truth labels from a CSV recording."""
     df = pd.read_csv(path)
     cols_lower = {str(col).strip().lower(): col for col in df.columns}
 
@@ -45,7 +47,6 @@ def _extract_emg_and_gt_from_csv(path: Path, channels: int) -> tuple[np.ndarray,
             break
 
     if not emg_cols:
-        # Fallback: select first `channels` numeric columns excluding known label/time columns.
         excluded = {"gt", "label", "action", "target", "timestamp", "time", "index", "unnamed: 0"}
         numeric_cols = [
             col
@@ -73,7 +74,7 @@ def _extract_emg_and_gt_from_csv(path: Path, channels: int) -> tuple[np.ndarray,
 
 
 def _extract_emg_and_gt_from_npy(path: Path, channels: int) -> tuple[np.ndarray, np.ndarray]:
-    """Load raw EMG channels and labels from a ReactEMG NPY array ``[gt, emg0..emg7]``."""
+    """Load raw EMG channels and labels from an NPY array ``[gt, emg0..emg7]``."""
     arr = np.load(path)
     if arr.ndim != 2:
         raise ValueError(f"Expected 2D array in {path}, got shape {arr.shape}")
@@ -90,24 +91,12 @@ def _extract_emg_and_gt_from_npy(path: Path, channels: int) -> tuple[np.ndarray,
     return raw_emg, actions
 
 
-def load_reactemg_file(
+def load_raw_recording(
     path: str | Path,
-    preprocess: Preprocess | None = None,
     channels: int = 8,
     num_classes: int = 6,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Load and preprocess a single ReactEMG ``.csv`` or ``.npy`` recording.
-
-    Args:
-        path: Path to ``.csv`` or ``.npy`` recording file.
-        preprocess: Optional :class:`~src.preprocess.Preprocess` instance.
-        channels: Expected EMG channel count (default 8).
-        num_classes: Gesture class count (3 or 6).
-
-    Returns:
-        Tuple ``(emg_tc, actions)`` with ``emg_tc`` of shape ``(T, C)`` float32
-        in ``[0, 1]`` and ``actions`` of shape ``(T,)`` int64 (``-1`` if unlabeled).
-    """
+    """Load raw unscaled EMG ``(T, C)`` float32 and valid labels ``(T,)`` int64."""
     file_path = Path(path)
     suffix = file_path.suffix.lower()
     if suffix == ".csv":
@@ -117,16 +106,25 @@ def load_reactemg_file(
     else:
         raise ValueError(f"Unsupported recording format {suffix!r} for {file_path}")
 
-    prep = preprocess if preprocess is not None else Preprocess(channels=channels)
-    emg_tc = prep.preprocess_sequence(raw_emg)
-
     valid_mask = (actions >= 0) & (actions < int(num_classes))
     actions = np.where(valid_mask, actions, -1).astype(np.int64, copy=False)
+    return raw_emg, actions
+
+
+def load_reactemg_file(
+    path: str | Path,
+    preprocess: Preprocess | None = None,
+    channels: int = 8,
+    num_classes: int = 6,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load and condition a single ``.csv`` or ``.npy`` sEMG recording."""
+    raw_emg, actions = load_raw_recording(path, channels=channels, num_classes=num_classes)
+    prep = preprocess if preprocess is not None else Preprocess(channels=channels, mode="waveformer")
+    emg_tc = prep.preprocess_sequence(raw_emg)
     return emg_tc, actions
 
 
 def _is_unlabeled_path(path: Path, root: Path) -> bool:
-    """Return True if path corresponds to an unlabeled recording."""
     try:
         rel = path.relative_to(root).as_posix().lower()
     except ValueError:
@@ -135,7 +133,6 @@ def _is_unlabeled_path(path: Path, root: Path) -> bool:
 
 
 def _is_epn_path(rel_posix: str) -> bool:
-    """Return True if a relative POSIX path belongs to EMG-EPN-612."""
     return "emg-epn-612" in rel_posix or "epn" in rel_posix
 
 
@@ -147,7 +144,6 @@ def _filter_by_dataset_selection(
     epn_subset_percentage: float,
     rng: np.random.Generator,
 ) -> list[Path]:
-    """Apply dataset selection and 3-class vs 6-class EPN filtering rules."""
     selection = dataset_selection.lower()
     rel_map = {p: p.relative_to(root).as_posix().lower() for p in labeled_files}
 
@@ -156,7 +152,6 @@ def _filter_by_dataset_selection(
     roam_set = set(roam_files)
     other_public = [p for p in labeled_files if not _is_epn_path(rel_map[p]) and p not in roam_set]
 
-    # Apply EPN 3-class filtering only when num_classes == 3; 6-class keeps all gestures.
     if int(num_classes) == 3 and epn_files:
         if selection == "pub_with_epn":
             open_fist = [p for p in epn_files if "open" in p.name.lower() or "fist" in p.name.lower()]
@@ -192,21 +187,62 @@ def _filter_by_dataset_selection(
     return sorted(dict.fromkeys(selected))
 
 
+def _fast_scan_epn_subjects(
+    epn_root: Path,
+    epn_subset_percentage: float,
+    val_split_ratio: float,
+    rng: np.random.Generator,
+) -> dict[str, list[Path]] | None:
+    """Fast subject-disjoint split across ``EMG-EPN-612/trainingJSON_user*`` directories."""
+    user_dirs = sorted(
+        entry.path
+        for entry in os.scandir(epn_root)
+        if entry.is_dir() and entry.name.lower().startswith("trainingjson_user")
+    )
+    if len(user_dirs) < 2:
+        return None
+
+    perm_u = rng.permutation(len(user_dirs))
+    keep_u = max(2, int(round(len(user_dirs) * min(1.0, max(0.01, float(epn_subset_percentage))))))
+    keep_u = min(len(user_dirs), keep_u)
+    selected_dirs = [Path(user_dirs[int(i)]) for i in perm_u[:keep_u]]
+
+    if val_split_ratio > 0.0:
+        val_u = max(1, min(len(selected_dirs) - 1, int(round(len(selected_dirs) * float(val_split_ratio)))))
+    else:
+        val_u = 0
+
+    val_dirs = selected_dirs[:val_u]
+    train_dirs = selected_dirs[val_u:]
+
+    def _collect_files(dirs: Sequence[Path]) -> list[Path]:
+        collected: list[Path] = []
+        for d in dirs:
+            for entry in sorted(os.scandir(d), key=lambda e: e.name):
+                if entry.is_file() and entry.name.lower().endswith((".npy", ".csv")):
+                    collected.append(Path(entry.path))
+        return collected
+
+    return {
+        "train": _collect_files(train_dirs),
+        "val": _collect_files(val_dirs),
+        "unlabeled": [],
+    }
+
+
 def discover_reactemg_files(
     data_root: str | Path,
-    dataset_selection: str = "pub_with_epn",
+    dataset_selection: str = "epn_only",
     num_classes: int = 6,
     epn_subset_percentage: float = 1.0,
-    val_split_ratio: float = 0.05,
+    val_split_ratio: float = 0.1,
     seed: int = 42,
 ) -> dict[str, list[Path]]:
-    """Discover and split ReactEMG recording paths into train, val, and unlabeled pools.
+    """Discover and split sEMG recording paths into train, val, and unlabeled pools.
 
-    Supports ``pub_with_epn``, ``epn_only``, ``roam_only``, and ``custom_folder`` modes.
-    Retains all 6 classes when ``num_classes == 6``, excludes ``"unlabel"`` and
-    ``testingJSON_user*`` files from supervised splits, and places explicit ``val`` /
-    ``validation`` directory files into ``val`` if present or uses a deterministically
-    shuffled ``val_split_ratio`` split otherwise.
+    For ``epn_only`` over multi-subject ``EMG-EPN-612/trainingJSON_user*`` folders,
+    performs fast **subject-disjoint** discovery (unseen subjects held out in ``val``)
+    so validation measures true cross-subject zero-shot generalization.
     """
     root = Path(data_root)
     if not root.exists():
@@ -214,8 +250,19 @@ def discover_reactemg_files(
 
     selection_lc = dataset_selection.lower()
     epn_only_root = root / "EMG-EPN-612"
-    walk_root = epn_only_root if (selection_lc == "epn_only" and epn_only_root.is_dir()) else root
+    rng = np.random.default_rng(int(seed))
 
+    if selection_lc == "epn_only" and int(num_classes) == 6 and epn_only_root.is_dir():
+        subject_split = _fast_scan_epn_subjects(
+            epn_root=epn_only_root,
+            epn_subset_percentage=epn_subset_percentage,
+            val_split_ratio=val_split_ratio,
+            rng=rng,
+        )
+        if subject_split is not None and subject_split["train"]:
+            return subject_split
+
+    walk_root = epn_only_root if (selection_lc == "epn_only" and epn_only_root.is_dir()) else root
     all_files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(walk_root):
         dirnames[:] = sorted(
@@ -235,7 +282,6 @@ def discover_reactemg_files(
         else:
             labeled_files.append(p)
 
-    rng = np.random.default_rng(int(seed))
     selected = _filter_by_dataset_selection(
         labeled_files=labeled_files,
         root=root,
@@ -281,8 +327,293 @@ def discover_reactemg_files(
     }
 
 
+def _extract_waveformer_windows_from_recording(
+    raw_emg: np.ndarray,
+    gt: np.ndarray,
+    window_size: int,
+    channels: int = 8,
+    num_classes: int = 6,
+    scale_divisor: float = 128.0,
+    hand_choice: str = "right",
+    remove_dc: bool = True,
+    stride: int = 40,
+    include_pre_rest: bool = True,
+) -> tuple[list[np.ndarray], list[int]]:
+    """Extract balanced sustained, onset-edge, and rest windows of shape ``(C, W)``.
+
+    Per-window DC removal ensures exact parity with real-time streaming inference.
+    """
+    t_len = raw_emg.shape[0]
+    if t_len == 0:
+        return [], []
+
+    if t_len < window_size:
+        reps = (window_size // t_len) + 1
+        raw_emg = np.tile(raw_emg, (reps, 1))[:window_size]
+        gt = np.tile(gt, reps)[:window_size]
+        t_len = window_size
+
+    def _cond_win(raw_slice: np.ndarray) -> np.ndarray:
+        emg_tc = preprocess_waveformer_window(
+            raw_slice,
+            scale_divisor=scale_divisor,
+            hand_choice=hand_choice,
+            remove_dc=remove_dc,
+            channels=channels,
+            return_nchw=False,
+        )
+        return emg_tc.T  # (C, W)
+
+    windows: list[np.ndarray] = []
+    labels: list[int] = []
+
+    valid_gt = gt[gt >= 0]
+    if valid_gt.size == 0:
+        return [], []
+
+    unique_classes = np.unique(valid_gt)
+    # Multi-gesture continuous sequence (e.g., ROAM / synthetic): slide across file
+    if len(unique_classes[unique_classes > 0]) > 1:
+        max_start = t_len - window_size
+        for s in range(0, max_start + 1, max(1, int(stride))):
+            e = s + window_size
+            tail_gt = gt[s + window_size // 2 : e]
+            tail_valid = tail_gt[tail_gt >= 0]
+            if tail_valid.size == 0:
+                continue
+            vals, counts = np.unique(tail_valid, return_counts=True)
+            lbl = int(vals[int(np.argmax(counts))])
+            if 0 <= lbl < num_classes:
+                windows.append(_cond_win(raw_emg[s:e]))
+                labels.append(lbl)
+        return windows, labels
+
+    # Single trial EPN-612 style: either pure noGesture (max==0) or 1 active gesture c in 1..5
+    active_cls = int(np.max(valid_gt))
+    if active_cls <= 0:
+        # Pure Relax trial: take 3 diverse 1.0s windows matching 3 active windows per active trial
+        candidate_starts = sorted({0, max(0, (t_len - window_size) // 2), max(0, t_len - window_size)})
+        if t_len >= window_size + 100 and len(candidate_starts) == 3:
+            candidate_starts = [50, max(0, (t_len - window_size) // 2), max(0, t_len - window_size - 50)]
+        for s in candidate_starts:
+            windows.append(_cond_win(raw_emg[s : s + window_size]))
+            labels.append(0)
+        return windows, labels
+
+    idx = np.where(gt == active_cls)[0]
+    g_start, g_end = int(idx[0]), int(idx[-1]) + 1
+    act_len = g_end - g_start
+
+    # 1. Sustained 100%-active contraction window (critical for continuous online holds!)
+    if act_len >= window_size:
+        s_sustained = min(max(0, g_start + (act_len - window_size) // 2), t_len - window_size)
+        act_seg = raw_emg[s_sustained : s_sustained + window_size]
+        windows.append(_cond_win(act_seg))
+        labels.append(active_cls)
+        if active_cls == 1:
+            rolled_seg = np.roll(act_seg, shift=max(1, len(act_seg) // 2), axis=0)
+            windows.append(_cond_win(rolled_seg))
+            labels.append(active_cls)
+    else:
+        seg = raw_emg[g_start:g_end]
+        reps = (window_size // len(seg)) + 1
+        sustained_raw = np.tile(seg, (reps, 1))[:window_size]
+        windows.append(_cond_win(sustained_raw))
+        labels.append(active_cls)
+        if active_cls == 1:
+            rolled_seg = np.roll(seg, shift=max(1, len(seg) // 2), axis=0)
+            rolled_raw = np.tile(rolled_seg, (reps, 1))[:window_size]
+            windows.append(_cond_win(rolled_raw))
+            labels.append(active_cls)
+
+    # 2. Natural centered gesture window from recording
+    center = (g_start + g_end) // 2
+    s_nat = min(max(0, center - window_size // 2), t_len - window_size)
+    windows.append(_cond_win(raw_emg[s_nat : s_nat + window_size]))
+    labels.append(active_cls)
+
+    # 3. Onset-edge window: trailing half..3/4 inside active gesture (fast live reaction)
+    onset_tail = max(min(act_len, max(80, int(0.65 * window_size))), min(act_len, window_size))
+    e_onset = min(t_len, max(window_size, g_start + onset_tail))
+    s_onset = e_onset - window_size
+    if s_onset != s_nat and g_start < e_onset:
+        windows.append(_cond_win(raw_emg[s_onset:e_onset]))
+        labels.append(active_cls)
+    else:
+        # Take shifted second sustained window if onset collides
+        s_alt = min(max(0, g_end - window_size), t_len - window_size)
+        windows.append(_cond_win(raw_emg[s_alt : s_alt + window_size]))
+        labels.append(active_cls)
+
+    # 4. Pre-onset or post-offset pure rest window if strictly rest throughout
+    if include_pre_rest:
+        if g_start >= window_size + 15:
+            s_rest = max(0, g_start - window_size - 15)
+            if np.all(gt[s_rest : s_rest + window_size] == 0):
+                windows.append(_cond_win(raw_emg[s_rest : s_rest + window_size]))
+                labels.append(0)
+        elif (t_len - g_end) >= window_size + 30:
+            s_rest = g_end + 30
+            if s_rest + window_size <= t_len and np.all(gt[s_rest : s_rest + window_size] == 0):
+                windows.append(_cond_win(raw_emg[s_rest : s_rest + window_size]))
+                labels.append(0)
+
+    # 5. Offset-to-relax cooldown window: previous gesture on left, >=90 samples (450ms) rest on right
+    e_release = g_end + 90
+    if e_release <= t_len and e_release >= window_size:
+        if np.all(gt[g_end:e_release] == 0):
+            s_release = e_release - window_size
+            windows.append(_cond_win(raw_emg[s_release:e_release]))
+            labels.append(0)
+
+    return windows, labels
+
+
+class WaveFormerDataset(Dataset):
+    """RAM-cached WaveFormer 6-class dataset returning ``(emg_1ct, label)`` pairs.
+
+    Applies WaveFormer time-series augmentations during training:
+    - Log-uniform amplitude gain scaling ``[0.55, 1.80]`` (gain robustness across users)
+    - Small channel-wise gain jitter ``[0.85, 1.15]``
+    - Additive Gaussian sensor noise ``N(0, jitter_sigma)``
+    """
+
+    def __init__(
+        self,
+        file_paths: Sequence[str | Path],
+        window_size: int = 200,
+        channels: int = 8,
+        num_classes: int = 6,
+        scale_divisor: float = 128.0,
+        hand_choice: str = "right",
+        remove_dc: bool = True,
+        stride: int = 40,
+        train: bool = True,
+        rescaling_range: tuple[float, float] = (0.55, 1.80),
+        jitter_sigma: float = 0.004,
+        cache_dir: str | Path | None = None,
+        seed: int = 42,
+    ) -> None:
+        self.file_paths = [Path(p) for p in file_paths]
+        self.window_size = int(window_size)
+        self.channels = int(channels)
+        self.num_classes = int(num_classes)
+        self.scale_divisor = float(scale_divisor)
+        self.hand_choice = str(hand_choice)
+        self.remove_dc = bool(remove_dc)
+        self.stride = max(1, int(stride))
+        self.train = bool(train)
+        self.rescaling_range = (float(rescaling_range[0]), float(rescaling_range[1]))
+        self.jitter_sigma = float(jitter_sigma)
+        self.seed = int(seed)
+        self._rng = np.random.default_rng(self.seed)
+
+        self.x_data, self.y_data = self._load_or_build_cache(cache_dir)
+
+    def _cache_file(self, cache_dir: str | Path) -> Path:
+        h = hashlib.sha256()
+        sig = (
+            f"v2|w={self.window_size}|c={self.channels}|k={self.num_classes}"
+            f"|dc={self.remove_dc}|hc={self.hand_choice}|tr={self.train}|n={len(self.file_paths)}"
+        )
+        h.update(sig.encode())
+        for p in self.file_paths[:5] + self.file_paths[-5:]:
+            h.update(str(p).encode())
+        split_tag = "train" if self.train else "val"
+        return Path(cache_dir) / f"waveformer_{split_tag}_{h.hexdigest()[:12]}.pt"
+
+    def _load_or_build_cache(self, cache_dir: str | Path | None) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_path = self._cache_file(cache_dir) if cache_dir is not None and len(self.file_paths) > 100 else None
+        if cache_path is not None and cache_path.is_file():
+            payload = torch.load(cache_path, map_location="cpu", weights_only=True)
+            return payload["x"], payload["y"]
+
+        win_list: list[np.ndarray] = []
+        lbl_list: list[int] = []
+
+        def _process_one(idx_path: tuple[int, Path]) -> tuple[list[np.ndarray], list[int]]:
+            idx_i, path = idx_path
+            try:
+                raw_emg, gt = load_raw_recording(path, channels=self.channels, num_classes=self.num_classes)
+            except Exception:
+                return [], []
+            return _extract_waveformer_windows_from_recording(
+                raw_emg=raw_emg,
+                gt=gt,
+                window_size=self.window_size,
+                channels=self.channels,
+                num_classes=self.num_classes,
+                scale_divisor=self.scale_divisor,
+                hand_choice=self.hand_choice,
+                remove_dc=self.remove_dc,
+                stride=self.stride,
+                include_pre_rest=not self.train or (idx_i % 2 == 0),
+            )
+
+        indexed_paths = list(enumerate(self.file_paths))
+        if len(indexed_paths) > 50:
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                for wins, lbls in tqdm(
+                    pool.map(_process_one, indexed_paths, chunksize=32),
+                    total=len(indexed_paths),
+                    desc=f"Extracting WaveFormer {'train' if self.train else 'val'} windows",
+                ):
+                    win_list.extend(wins)
+                    lbl_list.extend(lbls)
+        else:
+            for item in indexed_paths:
+                wins, lbls = _process_one(item)
+                win_list.extend(wins)
+                lbl_list.extend(lbls)
+
+        if not win_list:
+            x_empty = torch.zeros((0, self.channels, self.window_size), dtype=torch.float16)
+            y_empty = torch.zeros((0,), dtype=torch.long)
+            return x_empty, y_empty
+
+        x_arr = np.stack(win_list, axis=0)
+        y_arr = np.asarray(lbl_list, dtype=np.int64)
+        # Keep storage compact as float16 in RAM/disk (max precision loss < 1e-4 on [-1,1])
+        x_tensor = torch.from_numpy(x_arr).to(dtype=torch.float16)
+        y_tensor = torch.from_numpy(y_arr).to(dtype=torch.long)
+
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"x": x_tensor, "y": y_tensor}, cache_path)
+
+        return x_tensor, y_tensor
+
+    def class_counts(self) -> list[int]:
+        counts = torch.bincount(self.y_data, minlength=self.num_classes)
+        return [int(c) for c in counts.tolist()]
+
+    def __len__(self) -> int:
+        return int(self.y_data.numel())
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # (C, W) float32 -> (1, C, W)
+        x = self.x_data[idx].to(dtype=torch.float32)
+        y = self.y_data[idx]
+
+        if self.train:
+            lo, hi = self.rescaling_range
+            global_gain = float(np.exp(self._rng.uniform(np.log(lo), np.log(hi))))
+            ch_gain = torch.from_numpy(self._rng.uniform(0.85, 1.15, size=(self.channels, 1)).astype(np.float32))
+            x = x * (global_gain * ch_gain)
+            if self.jitter_sigma > 0.0:
+                x = x + torch.randn_like(x) * self.jitter_sigma
+            # Random small temporal circular shift for shift invariance inside window
+            if self._rng.random() < 0.5:
+                shift = int(self._rng.integers(-15, 16))
+                if shift != 0:
+                    x = torch.roll(x, shifts=shift, dims=-1)
+            if self.remove_dc:
+                x = x - x.mean(dim=-1, keepdim=True)
+
+        return x.unsqueeze(0), y
+
+
 def _find_first_transition(actions: np.ndarray) -> int:
-    """Return index of first label change inside an action window, or -1 if constant."""
     if len(actions) < 2:
         return -1
     diffs = np.where(actions[1:] != actions[:-1])[0]
@@ -292,12 +623,7 @@ def _find_first_transition(actions: np.ndarray) -> int:
 
 
 class ReactEMGDataset(Dataset):
-    """PyTorch Dataset returning dynamically masked ReactEMG multimodal 8-tuples.
-
-    Each item returns:
-        ``(emg_window, action_window, masked_emg, masked_actions,
-        mask_positions_emg, mask_positions_actions, task_idx, transition_index)``
-    """
+    """Legacy ReactEMG Dataset returning dynamically masked 8-tuples (for compatibility)."""
 
     def __init__(
         self,
@@ -331,7 +657,7 @@ class ReactEMGDataset(Dataset):
         self.num_classes = int(num_classes)
         self.mask_token_id = self.num_classes
         self.task_selection = tuple(int(t) for t in task_selection)
-        self.preprocess = preprocess if preprocess is not None else Preprocess(channels=self.channels)
+        self.preprocess = preprocess if preprocess is not None else Preprocess(channels=self.channels, mode="reactemg")
         self.mask_alignment = str(mask_alignment)
         self.lambda_poisson = float(lambda_poisson)
         self.sampling_probability_poisson = float(sampling_probability_poisson)
@@ -351,53 +677,32 @@ class ReactEMGDataset(Dataset):
 
         self.recordings_emg: list[np.ndarray] = []
         self.recordings_actions: list[np.ndarray] = []
-        self.samples: list[tuple[int, int, int, int]] = []  # (rec_idx, start, task_idx, transition_idx)
+        self.samples: list[tuple[int, int, int, int]] = []
         self.labeled_indices: list[int] = []
         self.unlabeled_indices: list[int] = []
-
         self._load_and_index()
 
     def set_epoch(self, epoch: int, total_epochs: int = 12) -> None:
-        """Update curriculum stage according to roamlab/reactemg linear_projection schedule."""
         if not self.with_training_curriculum:
             self.curriculum_stage = 2
             return
         total = max(1, int(total_epochs))
-        if self.embedding_method == "linear_projection":
-            self.curriculum_stage = 0 if int(epoch) < max(1, total // 2) else 2
-        else:
-            third = max(1, total // 3)
-            if int(epoch) < third:
-                self.curriculum_stage = 0
-            elif int(epoch) < 2 * third:
-                self.curriculum_stage = 1
-            else:
-                self.curriculum_stage = 2
+        self.curriculum_stage = 0 if int(epoch) < max(1, total // 2) else 2
 
     def _load_and_index(self) -> None:
-        for path in tqdm(
-            self.file_paths,
-            desc="Loading ReactEMG recordings",
-            disable=len(self.file_paths) <= 20,
-        ):
+        for path in tqdm(self.file_paths, desc="Loading recordings", disable=len(self.file_paths) <= 20):
             emg_tc, actions = load_reactemg_file(
-                path,
-                preprocess=self.preprocess,
-                channels=self.channels,
-                num_classes=self.num_classes,
+                path, preprocess=self.preprocess, channels=self.channels, num_classes=self.num_classes
             )
             if len(emg_tc) < self.window_size:
                 continue
-
             rec_idx = len(self.recordings_emg)
             self.recordings_emg.append(emg_tc)
             self.recordings_actions.append(actions)
-
             tasks_for_file = (3,) if self.is_unlabeled or np.all(actions < 0) else self.task_selection
             max_start = len(emg_tc) - self.window_size
             for start in range(0, max_start + 1, self.stride):
                 act_slice = actions[start : start + self.window_size]
-                # Skip labeled windows with unknown action labels (-1) unless running unlabeled task
                 has_unlabeled_tokens = bool(np.any(act_slice < 0))
                 if not self.is_unlabeled and has_unlabeled_tokens:
                     if 3 not in self.task_selection:
@@ -405,7 +710,6 @@ class ReactEMGDataset(Dataset):
                     effective_tasks: Iterable[int] = (3,)
                 else:
                     effective_tasks = tasks_for_file
-
                 trans_idx = -1 if has_unlabeled_tokens else _find_first_transition(act_slice)
                 for task_idx in effective_tasks:
                     sample_pos = len(self.samples)
@@ -418,90 +722,21 @@ class ReactEMGDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _sample_training_masks(
-        self,
-        rng: np.random.Generator,
-        task_idx: int,
-        trans_idx: int,
-    ) -> tuple[str, float]:
-        """Sample mask strategy and percentage matching roamlab/reactemg/dataset.py."""
-        mask_type = (
-            "poisson"
-            if float(rng.random()) < self.sampling_probability_poisson
-            else ("poisson" if task_idx == 3 else "end")
-        )
-        low, high = self.poisson_mask_range if mask_type == "poisson" else self.end_mask_range
-        if task_idx == 3:
-            mask_percentage = float(rng.uniform(max(0.0, low - 0.1), max(0.0, high - 0.1)))
-        else:
-            mask_percentage = float(rng.uniform(low, high))
-
-        selected_stage = 0
-        if task_idx == 0:
-            if self.deterministic:
-                # Deterministic validation directly measures 100%-masked intent prediction.
-                return "end", 1.0
-            if self.curriculum_stage == 1:
-                if self.transition_buffer <= trans_idx <= self.window_size - self.transition_buffer:
-                    selected_stage = 1
-                else:
-                    w0, w1 = self.stage_1_weights
-                    selected_stage = 0 if float(rng.random()) < (w0 / max(1e-12, w0 + w1)) else 1
-            elif self.curriculum_stage >= 2:
-                if self.transition_buffer <= trans_idx <= self.window_size - self.transition_buffer:
-                    selected_stage = 2
-                else:
-                    w0, w2 = self.stage_2_weights
-                    selected_stage = 0 if float(rng.random()) < (w0 / max(1e-12, w0 + w2)) else 2
-
-        if selected_stage == 1 and task_idx == 0:
-            if self.transition_buffer < trans_idx < self.window_size - self.transition_buffer:
-                mask_type = "targeted"
-        elif selected_stage == 2 and task_idx == 0:
-            if self.transition_buffer < trans_idx < self.window_size - self.transition_buffer:
-                if int(rng.integers(0, 2)) == 1:
-                    mask_type = "targeted"
-                else:
-                    mask_type = "end"
-                    mask_percentage = 1.0
-            else:
-                mask_type = "end"
-                mask_percentage = 1.0
-
-        return mask_type, float(mask_percentage)
-
-    def __getitem__(
-        self, idx: int
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
         rec_idx, start, task_idx, trans_idx = self.samples[idx]
         end = start + self.window_size
-
         emg_win = self.recordings_emg[rec_idx][start:end].copy()
         act_win = self.recordings_actions[rec_idx][start:end].copy()
-
         rng = np.random.default_rng(self.seed + idx) if self.deterministic else self._rng
-
-        if self.noise > 0.0 and not self.deterministic:
-            noise = rng.uniform(-self.noise, self.noise, size=emg_win.shape).astype(np.float32)
-            emg_win = np.clip(emg_win + noise, 0.0, 1.0).astype(np.float32)
 
         if task_idx == 3:
             act_win = np.full(self.window_size, self.mask_token_id, dtype=np.int64)
 
-        mask_type, mask_pct = self._sample_training_masks(rng, task_idx=task_idx, trans_idx=trans_idx)
+        mask_type = "end" if self.deterministic and task_idx == 0 else "poisson"
+        mask_pct = 1.0 if self.deterministic and task_idx == 0 else 0.5
         emg_channels = list(range(self.channels))
 
         if task_idx == 0:
-            # Predict masked action tokens from clean EMG
             masked_emg = emg_win.copy()
             mask_pos_emg = np.zeros_like(emg_win, dtype=bool)
             masked_actions, mask_pos_actions = masking_a2a(
@@ -516,7 +751,6 @@ class ReactEMGDataset(Dataset):
                 rng=rng,
             )
         elif task_idx == 1:
-            # Reconstruct masked EMG from clean actions
             masked_emg, mask_pos_emg = masking_a2a(
                 emg_win,
                 mask_percentage=mask_pct,
@@ -530,7 +764,6 @@ class ReactEMGDataset(Dataset):
             masked_actions = act_win.copy()
             mask_pos_actions = np.zeros_like(act_win, dtype=bool)
         elif task_idx == 2:
-            # Joint masked EMG + masked action reconstruction sharing drawn (mask_pct, mask_type)
             masked_actions, mask_pos_actions = masking_a2a(
                 act_win,
                 mask_percentage=mask_pct,
@@ -550,12 +783,9 @@ class ReactEMGDataset(Dataset):
                 mask_alignment=self.mask_alignment,
                 lambda_poisson=self.lambda_poisson,
                 mask_token=0.0,
-                transition_index=trans_idx,
-                transition_buffer=self.transition_buffer,
                 rng=rng,
             )
-        elif task_idx == 3:
-            # Self-supervised EMG reconstruction with all actions masked out
+        else:
             masked_emg, mask_pos_emg = masking_a2a(
                 emg_win,
                 mask_percentage=mask_pct,
@@ -568,8 +798,6 @@ class ReactEMGDataset(Dataset):
             )
             masked_actions = act_win.copy()
             mask_pos_actions = np.zeros_like(act_win, dtype=bool)
-        else:
-            raise ValueError(f"Unsupported task_idx {task_idx}; expected 0, 1, 2, or 3")
 
         return (
             torch.from_numpy(emg_win.astype(np.float32, copy=False)),
@@ -584,7 +812,7 @@ class ReactEMGDataset(Dataset):
 
 
 class LabeledUnlabeledSampler(Sampler[int]):
-    """Sampler mixing labeled (Tasks 0-2) and unlabeled (Task 3) indices across epochs."""
+    """Sampler mixing labeled and unlabeled indices (legacy compatibility)."""
 
     def __init__(
         self,
@@ -600,7 +828,6 @@ class LabeledUnlabeledSampler(Sampler[int]):
         self.shuffle = bool(shuffle)
         self.seed = int(seed)
         self.epoch = 0
-
         if len(self.labeled) > 0 and len(self.unlabeled) > 0:
             self._unlabeled_count = max(
                 1, min(len(self.unlabeled), int(round(len(self.labeled) * self.unlabeled_weight)))
@@ -629,10 +856,12 @@ class LabeledUnlabeledSampler(Sampler[int]):
             if self.shuffle:
                 rng.shuffle(unlab)
             parts.append(unlab[: self._unlabeled_count])
-
         if not parts:
             return iter([])
         combined = np.concatenate(parts)
         if self.shuffle:
             rng.shuffle(combined)
         return iter(combined.tolist())
+
+
+EMGDataset = WaveFormerDataset
